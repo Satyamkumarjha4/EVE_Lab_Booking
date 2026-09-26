@@ -32,3 +32,19 @@ class Payment(models.Model):
 
     def __str__(self):
         return f"Payment {self.reference} ({self.status})"
+
+
+class PaymentEvent(models.Model):
+    class Status(models.TextChoices):
+        SUCCESS = "SUCCESS", "Success"
+        FAILED = "FAILED", "Failed"
+
+    event_id = models.UUIDField(unique=True)
+    payment = models.ForeignKey(Payment, on_delete=models.CASCADE, related_name="events")
+    status = models.CharField(max_length=10, choices=Status.choices)
+    raw_payload = models.JSONField()
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"PaymentEvent {self.event_id} ({self.status})"

@@ -3,6 +3,7 @@ import random
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
+from accounts.models import User
 from catalog.models import Centre, CentreTest, Lab, Test
 
 LABS = [
@@ -66,9 +67,19 @@ TESTS_PER_CENTRE_RANGE = (12, 18)
 PRICE_VARIANCE = 0.15
 INACTIVE_RATE = 0.1
 
+# Demo logins for trying the role/permission matrix. Documented in the README; dev data only.
+DEMO_PASSWORD = "EveDemo@2026"
+DEMO_LAB_NAME = "Apollo Diagnostics"
+DEMO_CENTRE_NAME = "Apollo Diagnostics - Connaught Place"
+DEMO_USERS = [
+    ("client@demo.eve", User.Role.CLIENT),
+    ("lab@demo.eve", User.Role.LAB),
+    ("centre@demo.eve", User.Role.CENTRE),
+]
+
 
 class Command(BaseCommand):
-    help = "Seeds demo Labs, Centres, Tests, and CentreTest pricing (idempotent)."
+    help = "Seeds demo Labs, Centres, Tests, CentreTest pricing and demo logins (idempotent)."
 
     @transaction.atomic
     def handle(self, *args, **options):
@@ -77,13 +88,30 @@ class Command(BaseCommand):
         tests = self._seed_tests()
         centres = self._seed_labs_and_centres()
         created, updated = self._seed_centre_tests(centres, tests)
+        self._seed_demo_users()
 
         self.stdout.write(
             self.style.SUCCESS(
                 f"Seeded {len(LABS)} labs, {len(centres)} centres, {len(tests)} tests, "
-                f"{created} new centre-test prices ({updated} updated)."
+                f"{created} new centre-test prices ({updated} updated), "
+                f"{len(DEMO_USERS)} demo logins (password: {DEMO_PASSWORD})."
             )
         )
+
+    def _seed_demo_users(self):
+        lab = Lab.objects.get(name=DEMO_LAB_NAME)
+        centre = Centre.objects.get(name=DEMO_CENTRE_NAME)
+        affiliations = {
+            User.Role.CLIENT: {"lab": None, "centre": None},
+            User.Role.LAB: {"lab": lab, "centre": None},
+            User.Role.CENTRE: {"lab": None, "centre": centre},
+        }
+        for email, role in DEMO_USERS:
+            user, _ = User.objects.update_or_create(
+                email=email, defaults={"role": role, **affiliations[role]}
+            )
+            user.set_password(DEMO_PASSWORD)
+            user.save(update_fields=["password"])
 
     def _seed_tests(self):
         tests = []

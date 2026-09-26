@@ -27,35 +27,33 @@ class PaymentSerializer(serializers.ModelSerializer):
         ]
 
 
-class OrderCreateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Payment
-        fields = ["id", "reference", "booking", "amount", "method", "status", "created_at"]
-        read_only_fields = ["id", "reference", "amount", "status", "created_at"]
+class OrderCreateSerializer(serializers.Serializer):
+    booking = serializers.PrimaryKeyRelatedField(queryset=Booking.objects.none())
+    method = serializers.ChoiceField(choices=Payment.Method.choices)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get("request")
+        if request is not None and request.user.is_authenticated:
+            # Scoping the lookup means someone else's booking id reads as "does not exist"
+            # rather than "not yours", so booking ids can't be probed.
+            self.fields["booking"].queryset = Booking.objects.for_user(request.user)
 
     def validate_booking(self, booking):
         user = self.context["request"].user
-        if user.role == User.Role.CLIENT and booking.client_id != user.id:
-            raise serializers.ValidationError("You do not own this booking.")
-        if user.role == User.Role.CENTRE and booking.centre_test.centre_id != user.centre_id:
-            raise serializers.ValidationError("This booking does not belong to your centre.")
         if user.role not in (User.Role.CLIENT, User.Role.CENTRE):
             raise serializers.ValidationError("Only clients or centres can create payment orders.")
         if booking.status != Booking.Status.PENDING:
-            raise serializers.ValidationError("Only PENDING bookings can have a payment order created.")
-        if hasattr(booking, "payment"):
-            raise serializers.ValidationError("A payment order already exists for this booking.")
+            raise serializers.ValidationError("Only PENDING bookings can be paid for.")
         return booking
-
-    def create(self, validated_data):
-        booking = validated_data["booking"]
-        return Payment.objects.create(
-            booking=booking,
-            amount=booking.amount,
-            method=validated_data["method"],
-        )
 
 
 class SimulatePaymentSerializer(serializers.Serializer):
     payment_reference = serializers.UUIDField()
     outcome = serializers.ChoiceField(choices=OUTCOME_CHOICES)
+
+
+class WebhookEventSerializer(serializers.Serializer):
+    event_id = serializers.UUIDField()
+    payment_reference = serializers.UUIDField()
+    status = serializers.ChoiceField(choices=OUTCOME_CHOICES)

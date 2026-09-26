@@ -8,8 +8,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eve}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Published on localhost only: Docker's port publishing bypasses host firewalls, and these
+    # dev credentials / the password-less Redis must not be reachable from the network.
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eve} -d ${POSTGRES_DB:-eve}"]
       interval: 5s
@@ -19,8 +21,10 @@ services:
   redis:
     image: redis:7
     restart: unless-stopped
+    # Redis is also the Celery broker: anyone who can reach it could enqueue webhook-delivery
+    # tasks, which the worker would sign with the real secret. Keep it off the network.
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -38,8 +42,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      INTERNAL_BASE_URL: http://web:8000
+    # Lowercase `z` = SELinux label shared by every container mounting this dir. Uppercase `Z`
+    # makes it private to one container, so web and celery-worker would lock each other out.
     volumes:
-      - ./backend:/app:Z
+      - ./backend:/app:z
     ports:
       - "8000:8000"
     depends_on:
@@ -62,8 +69,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      INTERNAL_BASE_URL: http://web:8000
     volumes:
-      - ./backend:/app:Z
+      - ./backend:/app:z
     depends_on:
       db:
         condition: service_healthy

@@ -4,10 +4,15 @@ from django.contrib.auth.base_user import BaseUserManager
 class UserManager(BaseUserManager):
     use_in_migrations = True
 
+    def get_by_natural_key(self, email):
+        # Emails are stored lowercased; matching case-insensitively keeps login working for
+        # "Foo@Example.com" too.
+        return self.get(email__iexact=email)
+
     def _create_user(self, email, password, **extra_fields):
         if not email:
             raise ValueError("Email is required")
-        email = self.normalize_email(email)
+        email = self.normalize_email(email).lower()
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)

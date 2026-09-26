@@ -7,9 +7,19 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
+from core.serializers import DetailSerializer
 
 from .models import Booking
 from .serializers import BookingCreateSerializer, BookingSerializer
+from .services import cancel_booking
+
+
+def _bookings_for(user):
+    return (
+        Booking.objects.for_user(user)
+        .select_related("client", "centre_test__centre__lab", "centre_test__test")
+        .order_by("-created_at")
+    )
 
 
 @extend_schema(
@@ -18,15 +28,13 @@ from .serializers import BookingCreateSerializer, BookingSerializer
 )
 class BookingListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
+    throttle_scope = "default"
 
     def get_serializer_class(self):
         return BookingCreateSerializer if self.request.method == "POST" else BookingSerializer
 
     def get_queryset(self):
-        return (
-            Booking.objects.for_user(self.request.user)
-            .select_related("client", "centre_test__centre__lab", "centre_test__test")
-        )
+        return _bookings_for(self.request.user)
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -43,19 +51,29 @@ class BookingListCreateView(generics.ListCreateAPIView):
 class BookingDetailView(generics.RetrieveAPIView):
     serializer_class = BookingSerializer
     permission_classes = [IsAuthenticated]
+    throttle_scope = "default"
 
     def get_queryset(self):
-        return Booking.objects.for_user(self.request.user).select_related(
-            "client", "centre_test__centre__lab", "centre_test__test"
-        )
+        return _bookings_for(self.request.user)
 
 
 @extend_schema(
     summary="Cancel a booking",
-    description="Only the owning Client or the owning Lab (of the centre) can cancel.",
+    description=(
+        "Only the owning Client or the owning Lab (of the centre) can cancel. PENDING and "
+        "CONFIRMED bookings can be cancelled; cancelling a paid booking flags a simulated refund."
+    ),
+    request=None,
+    responses={
+        200: BookingSerializer,
+        403: DetailSerializer,
+        404: DetailSerializer,
+        409: DetailSerializer,
+    },
 )
 class BookingCancelView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_scope = "default"
 
     def post(self, request, pk):
         user = request.user
@@ -63,20 +81,10 @@ class BookingCancelView(APIView):
             raise PermissionDenied("Only the client or the lab can cancel a booking.")
 
         booking = get_object_or_404(Booking.objects.for_user(user), pk=pk)
-
-        if not booking.can_cancel():
+        cancelled = cancel_booking(booking)
+        if cancelled is None:
             return Response(
                 {"detail": "Booking cannot be cancelled from its current state."},
                 status=status.HTTP_409_CONFLICT,
             )
-
-        booking.cancel()
-
-        from payments.models import Payment
-
-        payment = Payment.objects.filter(booking=booking, status=Payment.Status.SUCCESS).first()
-        if payment:
-            payment.refund_status = Payment.RefundStatus.SIMULATED_REFUNDED
-            payment.save(update_fields=["refund_status"])
-
-        return Response(BookingSerializer(booking).data)
+        return Response(BookingSerializer(_bookings_for(user).get(pk=cancelled.pk)).data)

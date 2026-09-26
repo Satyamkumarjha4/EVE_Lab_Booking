@@ -125,6 +125,24 @@ def test_cannot_cancel_failed_booking(client, booking_setup):
 
 
 @pytest.mark.django_db
+def test_simulating_payment_after_cancel_is_rejected(client, booking_setup):
+    client_user, booking, _centre, _lab = booking_setup
+    payment = Payment.objects.create(booking=booking, amount=booking.amount, method="CARD")
+    client.force_authenticate(user=client_user)
+    client.post(f"/bookings/{booking.id}/cancel/")
+
+    response = client.post(
+        "/payments/", {"payment_reference": str(payment.reference), "outcome": "SUCCESS"}
+    )
+
+    assert response.status_code == 409
+    booking.refresh_from_db()
+    payment.refresh_from_db()
+    assert booking.status == Booking.Status.CANCELLED
+    assert payment.status == Payment.Status.INITIATED
+
+
+@pytest.mark.django_db
 def test_cancel_invalid_booking_id_returns_404(client, booking_setup):
     client_user, _booking, _centre, _lab = booking_setup
     client.force_authenticate(user=client_user)

@@ -10,7 +10,9 @@ env = environ.Env(
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
-SECRET_KEY = env("SECRET_KEY", default="insecure-dev-key-change-me")
+# No fallback on purpose: a missing secret should fail at startup, not silently run with a
+# publicly known key (SECRET_KEY also signs the JWTs).
+SECRET_KEY = env("SECRET_KEY")
 DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
 
@@ -25,6 +27,7 @@ DJANGO_APPS = [
 THIRD_PARTY_APPS = [
     "rest_framework",
     "drf_spectacular",
+    "corsheaders",
 ]
 LOCAL_APPS = [
     "core",
@@ -38,6 +41,7 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -121,6 +125,21 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.ScopedRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "auth": "5/min",
+        "payments": "20/min",
+        # Every webhook arrives from the provider's (here: celery-worker's) address, so it needs
+        # its own, roomier bucket instead of sharing the per-user `payments` limit.
+        "webhook": "120/min",
+        "default": "100/min",
+    },
+    # No proxy sits in front of Django here. DRF's default (None) trusts a client-supplied
+    # X-Forwarded-For as the throttle identity, which would let anyone reset the login throttle
+    # by changing that header.
+    "NUM_PROXIES": 0,
 }
 
 SPECTACULAR_SETTINGS = {
@@ -128,6 +147,14 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "Backend API for the EVE Diagnostics booking and payment simulation platform.",
     "VERSION": "0.1.0",
     "SERVE_INCLUDE_SCHEMA": False,
+    "ENUM_NAME_OVERRIDES": {
+        "BookingStatusEnum": "bookings.models.Booking.Status",
+        "PaymentStatusEnum": "payments.models.Payment.Status",
+        "PaymentRefundStatusEnum": "payments.models.Payment.RefundStatus",
+        # PaymentEvent.status and the simulate/webhook outcome fields share the same
+        # SUCCESS/FAILED choice set, so they resolve to one canonical enum name.
+        "PaymentOutcomeEnum": "payments.serializers.OUTCOME_CHOICES",
+    },
 }
 
 # --- JWT (simplejwt) ---
@@ -137,3 +164,12 @@ SIMPLE_JWT = {
     "ROTATE_REFRESH_TOKENS": False,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
+
+# --- CORS (local frontend dev server) ---
+CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=["http://localhost:3000"])
+
+# --- Payment webhook simulation ---
+WEBHOOK_SECRET = env("WEBHOOK_SECRET")
+# Base URL the celery-worker uses to call back into this service's own webhook endpoint,
+# simulating a real provider's async delivery over HTTP.
+INTERNAL_BASE_URL = env("INTERNAL_BASE_URL", default="http://localhost:8000")

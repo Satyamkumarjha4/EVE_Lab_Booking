@@ -27,6 +27,16 @@ def test_login_returns_token_pair_for_valid_credentials(client, user):
 
 
 @pytest.mark.django_db
+def test_login_email_is_case_insensitive(client, user):
+    response = client.post(
+        "/auth/login/",
+        {"email": "Client@Example.COM", "password": "a-strong-passw0rd"},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.django_db
 def test_login_rejects_bad_password(client, user):
     response = client.post(
         "/auth/login/",
