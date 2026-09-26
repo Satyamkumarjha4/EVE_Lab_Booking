@@ -115,3 +115,8 @@ erDiagram
   deviation from this diagram. `User` also drops `username` in favor of `email` as the login field
   (`USERNAME_FIELD = "email"`), matching this diagram's `USER.email` (there's no `USER.username`
   drawn above).
+- **`BOOKING.client_id` is implemented as nullable**, not required as drawn above — Architecture doc
+  §2 has a Centre create bookings on its own behalf for walk-in patients, who typically have no
+  `User` account to point `client_id` at. Rather than inventing an undocumented patient-identity
+  field, a Centre-created booking simply has `client = null`; ownership/visibility for it is derived
+  from `centre_test`'s centre instead of from `client`.
