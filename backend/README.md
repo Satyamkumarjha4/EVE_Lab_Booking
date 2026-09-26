@@ -1,6 +1,8 @@
 # Backend
 
-Django + DRF project — scaffolded in Phase 1 (see [docs/PHASES.md](../docs/PHASES.md)).
+Django + DRF project: the graded deliverable. Start with the [root README](../README.md), which
+covers setup, the API reference and examples, schema design, the payment/webhook design and
+assumptions.
 
-For how to start the stack, access Postgres/Redis/Celery, view logs, and reach Swagger, see
+For operational detail (ports, logs, Postgres/Redis access, troubleshooting) see
 [docs/IMPLEMENTATION.md](../docs/IMPLEMENTATION.md).

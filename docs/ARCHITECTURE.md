@@ -49,7 +49,7 @@ required for this scope but noted as a natural extension. Standard `/auth/signup
 | Create booking | ✅ (self) | ❌ | ✅ (own) | ❌ |
 | Cancel booking | ✅ (own) | ✅ (own centres' bookings) | ❌ | ❌ |
 | View bookings | own only | own centres' | own centre's | all |
-| Manage centre/test catalog | ❌ | ✅ (own centres) | ✅ (own) | ✅ |
+| Manage centre/test catalog | ❌ | ✅ (own centres; only Lab can create centres) | ✅ (own) | ✅ (Django admin; also curates the global `Test` list) |
 | Trigger payment | ✅ (own booking) | ❌ | ✅ (own) | ❌ |
 | Receive webhook | n/a (system-to-system, no user auth — see §5.3) | | | |
 
@@ -69,22 +69,31 @@ POST   /auth/signup/
 POST   /auth/login/
 POST   /auth/refresh/
 
-GET    /centres/                      list centres (+ nested/queryable tests)
-GET    /centres/{id}/tests/           tests + price at a centre
+GET    /auth/me/
+
+GET    /centres/                      list centres (public; CENTRE login sees own)
+POST   /centres/                      lab creates a centre under its own lab
+PATCH  /centres/{id}/                 lab (own lab) / centre (own): name, location
+GET    /centres/{id}/tests/           active tests + price at a centre (?include_inactive for managers)
+POST   /centres/{id}/tests/           lab/centre managers: offer a global Test at a centre price
+PATCH  /centres/{id}/tests/{ct_id}/   lab/centre managers: price, is_active
+GET    /tests/                        global test catalog
 
 POST   /bookings/                     create booking (client, own; or centre, own) — PENDING
 GET    /bookings/                     role-scoped list
 GET    /bookings/{id}/
 POST   /bookings/{id}/cancel/         client (own) or lab (own centres) only
 
-POST   /payments/orders/              create Order against a PENDING booking
+POST   /payments/orders/              create (201) or resume (200) the Order of a PENDING booking
 POST   /payments/                     simulate outcome for an order (SUCCESS|FAILED) — client or centre (own) — per assignment spec
 POST   /payments/webhook/             provider callback, idempotent — per assignment spec
 ```
 
 `POST /payments/` and `POST /payments/webhook/` are named exactly as the assignment specifies since
 they are graded contract points; `/payments/orders/` is an addition to support the "order
-generation, then payment" flow described in the product requirement.
+generation, then payment" flow described in the product requirement. Order creation is
+create-or-resume, so a user who abandons checkout can come back and pay the same order instead of
+being stuck with a PENDING booking that can never be paid.
 
 ## 5. Payment & Webhook Design
 
@@ -140,6 +149,14 @@ Idempotency algorithm:
    path, e.g. testing the webhook directly per assignment's edge-case list), apply the transition
    via §5.4.
 
+As implemented, the event insert (step 1) and the state transition (steps 2–3) run inside **one
+outer transaction**, with the insert in a nested savepoint so its `IntegrityError` can be caught.
+If processing raises after a successful insert, the event row rolls back as well. Recording the event in its own
+transaction first would be subtly wrong: a crash after that commit leaves an event marked as seen but
+never applied, and every provider redelivery would then be dismissed as a duplicate. The payment is
+looked up by reference before the insert, because `PaymentEvent.payment` is a non-null FK. An
+unknown reference returns 404 without recording anything.
+
 ### 5.4 Shared state-transition function
 
 Both call sites (sync `/payments/` and the webhook) funnel through one function,
@@ -150,6 +167,21 @@ guarantees:
 - No corrupted booking state from racing sync + async paths — whichever gets the row lock first
   wins, second call sees the already-updated state and short-circuits.
 
+Implementation details that the guarantees depend on:
+
+- **Lock order is Booking row, then Payment row**, in every writer: `apply_payment_result()`,
+  `open_payment_order()` (order creation) and `cancel_booking()` (§5.5). Locking only the payment
+  wasn't enough, because cancellation writes the *booking*. Without a shared lock, a cancel racing a
+  payment could interleave, and a consistent order is what rules out deadlocks.
+- It returns `(payment, applied)`. `applied=False` means the payment was already resolved: the sync
+  endpoint turns that into a 409 (it lost a race), and the webhook compares statuses to decide
+  between a quiet no-op and a logged conflict.
+- **It only moves a booking out of `PENDING`.** Before the Phase 7 audit it set CONFIRMED/FAILED
+  unconditionally, so a payment resolved after cancellation (an abandoned INITIATED order, then a
+  late webhook) resurrected a CANCELLED booking as CONFIRMED. Now a late SUCCESS on a cancelled
+  booking is recorded truthfully on the payment and flagged `SIMULATED_REFUNDED`, and the booking
+  stays CANCELLED. The sync endpoint rejects paying a non-PENDING booking up front with a 409.
+
 ### 5.5 Cancellation & simulated refund
 
 `POST /bookings/{id}/cancel/`:
@@ -158,31 +190,55 @@ guarantees:
   without building a second payment rail).
 - Booking → `CANCELLED` regardless of prior state (except from another terminal state, which is
   rejected with 409).
+- Implemented as `bookings.services.cancel_booking()`, under the same Booking-then-Payment row lock
+  as §5.4. A payment still `INITIATED` at cancel time is left alone; if it later resolves, §5.4's
+  cancelled-booking branch applies.
 
 ## 6. Redis Usage
 
 1. **Celery broker + result backend** (`redis://redis:6379/0`).
 2. **Read-through cache** for `GET /centres/` and `GET /centres/{id}/tests/` (catalog data changes
-   rarely) — cache key includes query params, TTL ~60s, invalidated on Lab catalog writes.
+   rarely) — cache key includes the caller's scope and query params, TTL ~60s, invalidated on
+   catalog writes. Invalidation is a `post_save`/`post_delete` signal on `Lab` (its name is embedded
+   in centre payloads), `Centre`, `Test` and `CentreTest`. It clears every `centres:*` key
+   immediately **and again via `transaction.on_commit`**, because a read that runs while the write's
+   transaction is still open sees the old rows and would re-cache them for a full TTL. Signals cover
+   every write path (API, Django admin, seed command); queryset `.update()` bypasses them and isn't
+   used on catalog models.
+3. **Throttle counters** for DRF's rate limiting (§7) live in the same cache DB.
 
 ## 7. Rate Limiting
 
 DRF `ScopedRateThrottle`:
-- `auth` scope (signup/login): tighter (e.g. 5/min) — brute-force protection.
-- `payments` scope (`/payments/`, `/payments/webhook/`): moderate (e.g. 20/min) — abuse protection
-  without blocking the webhook simulation's retries.
-- default scope: generous (e.g. 100/min) for read endpoints.
+- `auth` scope (signup/login): 5/min, for brute-force protection. Token refresh is in `default`:
+  refresh tokens are signed and unguessable, so they aren't a brute-force target, and sharing the
+  5/min bucket would let routine refreshes lock a user out of logging in.
+- `payments` scope (`/payments/orders/`, `/payments/`): 20/min, for abuse protection.
+- `webhook` scope (`/payments/webhook/`): 120/min. This changed from the original plan of sharing
+  `payments`: every delivery comes from the provider's address (here the celery-worker container),
+  so a per-IP bucket sized for one user would start dropping legitimate confirmations at
+  20 payments/min system-wide.
+- `default` scope: 100/min for everything else user-facing.
+
+Clients are identified by user id when authenticated and by socket address otherwise, with
+`NUM_PROXIES = 0`. DRF's default (`None`) uses a client-supplied `X-Forwarded-For` header verbatim
+as the identity, so rotating that header would reset the login limit on every request. Behind a
+real reverse proxy this should be set to the number of trusted proxies.
 
 ## 8. Docker Compose Topology
 
 ```
 services:
-  db:            postgres:16
-  redis:         redis:7
-  web:           Django + gunicorn (or runserver for dev), depends_on db, redis
-  celery-worker: same image as web, `celery -A eve worker`
-  celery-beat:   (optional, only if we add a scheduled cleanup job for stale PENDING bookings)
+  db:            postgres:16      published on 127.0.0.1 only
+  redis:         redis:7          published on 127.0.0.1 only (password-less broker)
+  web:           Django runserver (dev), depends_on db, redis
+  celery-worker: same image as web, `celery -A eve worker`; calls back to http://web:8000
+  celery-beat:   (not added — would host a stale-PENDING cleanup job, see README §12)
 ```
+
+Django's `ALLOWED_HOSTS` must include `web`, since that is the Host header on the worker's webhook
+calls. Both app containers bind-mount `./backend` with the shared SELinux label `:z` (see
+`docs/IMPLEMENTATION.md`).
 
 ## 9. Testing Strategy
 
