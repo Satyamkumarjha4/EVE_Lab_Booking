@@ -12,12 +12,13 @@ staticfiles/
 
 # Node
 node_modules/
-frontend/dist/
+frontend/.next/
 
 # Env
 .env
 .env.*
 !.env.example
+!frontend/.env.local.example
 
 # Editors/OS
 .vscode/

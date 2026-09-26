@@ -10,12 +10,18 @@ needed for a clean demo.
 
 ## 2. Tech Stack
 
-- **React + Vite** (fast setup, no need for Next.js SSR here).
+- **Next.js (App Router) + TypeScript** — chosen over the originally-planned Vite+React so the demo
+  could be previewed/built out of order relative to the backend phases (see `docs/PHASES.md` Phase
+  8). No SSR/data-fetching features are actually used — every page is a client component
+  (`"use client"`) hitting the DRF API directly from the browser; Next.js is used purely as the
+  project scaffold/router, this remains a client-rendered SPA-style app.
 - **Tailwind CSS** for styling.
 - **shadcn/ui** for components (buttons, cards, dialogs, tabs, form inputs) — gives a clean,
   professional look with minimal custom CSS work.
-- Plain `fetch`/`axios` for API calls; JWT stored in memory + refreshed via the refresh endpoint
-  (no need for a heavy state library at this scope — React Context for auth state is enough).
+- Plain `fetch` for API calls (one wrapper function with a 401→refresh→retry-once pattern); JWT
+  stored in memory + refreshed via the refresh endpoint (no need for a heavy state library at this
+  scope — React Context for auth state is enough). A hard page reload loses the session — a
+  deliberate tradeoff, not a bug.
 
 ## 3. UI Reference Sources
 
@@ -45,9 +51,13 @@ seed-data realism (test names, typical price ranges).
      + UPI ID text).
    - On submit, reveal **Simulate Success** / **Simulate Failure** buttons (standing in for the
      customer's bank/UPI app step — see PRD §5).
-   - On click, call `POST /payments/`, then poll or optimistically show "Payment {status}, booking
-     {status}" — a short toast/banner explains that a webhook confirmation is being simulated
-     asynchronously in the background (educational for whoever reviews the demo).
+   - On click, call `POST /payments/` (payment simulate endpoint). It is synchronous and final: the
+     response already carries the resolved payment and booking status, so the UI shows it
+     immediately with no polling. The provider webhook the backend enqueues arrives 2–8 s later
+     and confirms the same outcome, which is an idempotent no-op for state, so nothing on screen
+     changes.
+   - Re-opening checkout for a booking whose order was abandoned resumes that same order (the
+     backend returns it with 200) instead of erroring.
 5. **Booking history / status** — list of the client's own bookings with status badges
    (PENDING/CONFIRMED/FAILED/CANCELLED) and a **Cancel** action where allowed.
 
