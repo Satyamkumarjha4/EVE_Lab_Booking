@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Django
+backend/**/migrations/__pycache__/
+db.sqlite3
+staticfiles/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Test/coverage
+.pytest_cache/
+htmlcov/
+.coverage
