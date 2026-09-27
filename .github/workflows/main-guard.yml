@@ -1,0 +1,124 @@
+name: Main branch guard
+
+# Safety net for main. Direct pushes to main should already be blocked by the
+# branch protection rule (see docs/CI_SETUP.md); this workflow covers the case
+# where a merged PR turns out to break tests (e.g. a stale branch merged after
+# main moved on). If tests fail on main, it auto-reverts the offending commit
+# and opens an issue. It never force-pushes or rewrites history.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: main-guard
+  cancel-in-progress: false
+
+env:
+  SECRET_KEY: ci-only-secret-key
+  DEBUG: "True"
+  WEBHOOK_SECRET: ci-only-webhook-secret
+  POSTGRES_DB: eve
+  POSTGRES_USER: eve
+  POSTGRES_PASSWORD: eve
+  POSTGRES_HOST: localhost
+  POSTGRES_PORT: "5432"
+  REDIS_URL: redis://localhost:6379/0
+  CELERY_BROKER_URL: redis://localhost:6379/1
+  CELERY_RESULT_BACKEND: redis://localhost:6379/1
+
+jobs:
+  backend-tests:
+    # A revert commit's own message starts with "Revert " (git's default) -
+    # skip re-testing it here to avoid immediately trying to revert a revert
+    # if main was already broken further back; the tracking issue still gets
+    # filed for a human to look at in that case.
+    if: ${{ !startsWith(github.event.head_commit.message, 'Revert "') }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: eve
+          POSTGRES_USER: eve
+          POSTGRES_PASSWORD: eve
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U eve -d eve"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/backend-tests
+
+  revert:
+    needs: backend-tests
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A PAT that's allowlisted to bypass main's branch protection rule.
+          # The default GITHUB_TOKEN can't push to a protected branch, and
+          # this needs to (see docs/CI_SETUP.md for setup).
+          token: ${{ secrets.MAIN_REVERT_TOKEN }}
+          fetch-depth: 0
+
+      - name: Revert the failing commit
+        id: revert
+        run: |
+          set -euo pipefail
+          git config user.name "eve-ci-bot"
+          git config user.email "eve-ci-bot@users.noreply.github.com"
+
+          SHA="${{ github.sha }}"
+          PARENTS=$(git rev-list --parents -n 1 "$SHA" | wc -w)
+
+          if [ "$PARENTS" -gt 2 ]; then
+            git revert --no-edit -m 1 "$SHA"
+          else
+            git revert --no-edit "$SHA"
+          fi
+
+          git push origin HEAD:main
+
+      - name: Open an issue documenting the revert
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.sha;
+            const shortSha = sha.slice(0, 7);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const revertSucceeded = '${{ steps.revert.outcome }}' === 'success';
+            const title = revertSucceeded
+              ? `Reverted ${shortSha} on main: tests failed after merge`
+              : `main is broken at ${shortSha} and auto-revert failed`;
+            const body = [
+              `Commit ${sha} failed the test suite on \`main\` after merge.`,
+              '',
+              `- Failing commit: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/commit/${sha}`,
+              `- Run: ${runUrl}`,
+              revertSucceeded
+                ? 'A revert commit was pushed to `main` automatically.'
+                : 'Automatic revert did not complete - `MAIN_REVERT_TOKEN` may be missing/expired, or main\'s branch protection does not allow it to push. Main needs a manual fix or revert.',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['ci-failure', 'main-revert'],
+            });

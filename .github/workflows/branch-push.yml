@@ -1,0 +1,102 @@
+name: Branch push checks
+
+# Runs on every push to a non-main branch. If tests fail, files/updates a
+# tracking issue naming the offending branch and commit so it doesn't get
+# merged silently.
+on:
+  push:
+    branches-ignore: [main]
+
+concurrency:
+  group: branch-push-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SECRET_KEY: ci-only-secret-key
+  DEBUG: "True"
+  WEBHOOK_SECRET: ci-only-webhook-secret
+  POSTGRES_DB: eve
+  POSTGRES_USER: eve
+  POSTGRES_PASSWORD: eve
+  POSTGRES_HOST: localhost
+  POSTGRES_PORT: "5432"
+  REDIS_URL: redis://localhost:6379/0
+  CELERY_BROKER_URL: redis://localhost:6379/1
+  CELERY_RESULT_BACKEND: redis://localhost:6379/1
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: eve
+          POSTGRES_USER: eve
+          POSTGRES_PASSWORD: eve
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U eve -d eve"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/backend-tests
+
+  flag-failure:
+    needs: backend-tests
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open/update a tracking issue for the failing commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = context.ref.replace('refs/heads/', '');
+            const sha = context.sha.slice(0, 7);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `CI failing on branch \`${branch}\` at ${sha}`;
+            const body = [
+              `Tests failed for commit ${context.sha} on branch \`${branch}\`.`,
+              '',
+              `- Commit: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/commit/${context.sha}`,
+              `- Run: ${runUrl}`,
+              `- Pushed by: @${context.actor}`,
+              '',
+              'This branch should not be merged into main until this is fixed.',
+            ].join('\n');
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'ci-failure',
+            });
+            const match = existing.data.find(i => i.title === title);
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['ci-failure'],
+              });
+            }

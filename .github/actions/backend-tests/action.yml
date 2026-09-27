@@ -1,0 +1,36 @@
+name: Run backend test suite
+description: >
+  Installs backend dependencies, applies migrations, and runs the pytest suite.
+  Assumes the calling job has already started `postgres` and `redis` services
+  reachable at localhost, and provided the env vars pytest-django needs
+  (SECRET_KEY, DEBUG, WEBHOOK_SECRET, POSTGRES_*, REDIS_URL, CELERY_*).
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: backend/requirements.txt
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: backend
+      run: pip install --no-cache-dir -r requirements.txt
+
+    - name: Django system check
+      shell: bash
+      working-directory: backend
+      run: python manage.py check
+
+    - name: Apply migrations
+      shell: bash
+      working-directory: backend
+      run: python manage.py migrate --noinput
+
+    - name: Run pytest
+      shell: bash
+      working-directory: backend
+      run: pytest -v

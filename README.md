@@ -537,6 +537,7 @@ docker-compose.yml
 | [docs/PHASES.md](docs/PHASES.md) | Build order and what each phase delivered |
 | [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md) | Scope of the bonus frontend |
 | [docs/API_DOC.md](docs/API_DOC.md) | Every endpoint: method, auth, request/response, error codes |
+| [docs/CI_SETUP.md](docs/CI_SETUP.md) | GitHub Actions workflows, required branch protection and secret setup |
 
 **Frontend (bonus).** `cd frontend && cp .env.local.example .env.local && npm install && npm run
 dev`, then open http://localhost:3000. Patients (`/login`) can search tests, filter by city, lab
