@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SECRET_KEY: ci-only-secret-key
+  SECRET_KEY: ci-only-secret-key-that-is-long-enough-for-jwt-hmac-signing
   DEBUG: "True"
   WEBHOOK_SECRET: ci-only-webhook-secret
   POSTGRES_DB: eve

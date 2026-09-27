@@ -18,7 +18,9 @@ runs:
     - name: Install dependencies
       shell: bash
       working-directory: backend
-      run: pip install --no-cache-dir -r requirements.txt
+      # No --no-cache-dir here: actions/setup-python's cache: pip step above needs
+      # pip's own cache dir populated to have something to save.
+      run: pip install -r requirements.txt
 
     - name: Django system check
       shell: bash
