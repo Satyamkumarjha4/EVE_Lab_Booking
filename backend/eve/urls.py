@@ -13,6 +13,7 @@ urlpatterns = [
     path("centres/", include("scheduling.urls")),
     path("tests/", CatalogTestListView.as_view(), name="test-list"),
     path("bookings/", include("bookings.urls")),
+    path("patients/", include("accounts.patient_urls")),
     path("payments/", include("payments.urls")),
     path("api/health/", include("core.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),

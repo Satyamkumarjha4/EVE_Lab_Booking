@@ -135,6 +135,9 @@ REST_FRAMEWORK = {
         # Every webhook arrives from the provider's (here: celery-worker's) address, so it needs
         # its own, roomier bucket instead of sharing the per-user `payments` limit.
         "webhook": "120/min",
+        # Patient lookup returns another person's PII by email guess and is intentionally
+        # platform-wide, so it gets a tighter bucket than "default" to slow enumeration.
+        "patient_lookup": "20/min",
         "default": "100/min",
     },
     # No proxy sits in front of Django here. DRF's default (None) trusts a client-supplied

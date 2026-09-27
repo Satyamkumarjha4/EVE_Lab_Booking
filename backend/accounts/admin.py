@@ -12,6 +12,10 @@ class UserAdmin(BaseUserAdmin):
     search_fields = ("email",)
     fieldsets = (
         (None, {"fields": ("email", "password")}),
+        (
+            "Personal details",
+            {"fields": ("first_name", "last_name", "phone", "date_of_birth", "gender")},
+        ),
         ("Role & assignment", {"fields": ("role", "lab", "centre")}),
         (
             "Permissions",
