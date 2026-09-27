@@ -8,7 +8,18 @@ from .models import Centre, CentreTest, Lab, Test
 class LabMinimalSerializer(serializers.ModelSerializer):
     class Meta:
         model = Lab
-        fields = ["id", "name"]
+        fields = ["id", "name", "transaction_fee_percent"]
+
+
+class LabSettingsSerializer(serializers.ModelSerializer):
+    transaction_fee_percent = serializers.DecimalField(
+        max_digits=5, decimal_places=2, min_value=Decimal("0"), max_value=Decimal("100")
+    )
+
+    class Meta:
+        model = Lab
+        fields = ["id", "name", "transaction_fee_percent"]
+        read_only_fields = ["id"]
 
 
 class CentreSerializer(serializers.ModelSerializer):

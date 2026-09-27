@@ -5,36 +5,43 @@ from django.db import transaction
 
 from accounts.models import User
 from catalog.models import Centre, CentreTest, Lab, Test
+from scheduling.services import create_default_schedule
 
 LABS = [
     {
         "name": "Apollo Diagnostics",
         "location": "Delhi",
+        "fee_percent": 5,
         "centres": ["Connaught Place", "Karol Bagh", "Dwarka"],
     },
     {
         "name": "Metro Health Labs",
         "location": "Mumbai",
+        "fee_percent": 8,
         "centres": ["Andheri", "Bandra", "Powai"],
     },
     {
         "name": "CarePlus Diagnostics",
         "location": "Bangalore",
+        "fee_percent": 5,
         "centres": ["Indiranagar", "Koramangala", "Whitefield"],
     },
     {
         "name": "Wellness Path Labs",
         "location": "Hyderabad",
+        "fee_percent": 10,
         "centres": ["Banjara Hills", "Gachibowli", "Madhapur"],
     },
     {
         "name": "MediCore Labs",
         "location": "Chennai",
+        "fee_percent": 3,
         "centres": ["T Nagar", "Anna Nagar", "Velachery"],
     },
     {
         "name": "VitalCheck Diagnostics",
         "location": "Pune",
+        "fee_percent": 6,
         "centres": ["Kothrud", "Viman Nagar", "Hinjewadi"],
     },
 ]
@@ -123,8 +130,14 @@ class Command(BaseCommand):
     def _seed_labs_and_centres(self):
         centres = []
         for lab_data in LABS:
+            # The fee is only set when the lab is created, so a lab admin's own change survives
+            # re-running the seed.
             lab, _ = Lab.objects.get_or_create(
-                name=lab_data["name"], defaults={"location": lab_data["location"]}
+                name=lab_data["name"],
+                defaults={
+                    "location": lab_data["location"],
+                    "transaction_fee_percent": lab_data["fee_percent"],
+                },
             )
             for locality in lab_data["centres"]:
                 centre, _ = Centre.objects.get_or_create(
@@ -132,6 +145,7 @@ class Command(BaseCommand):
                     name=f"{lab.name} - {locality}",
                     defaults={"location": f"{locality}, {lab_data['location']}"},
                 )
+                create_default_schedule(centre)
                 centres.append(centre)
         return centres
 

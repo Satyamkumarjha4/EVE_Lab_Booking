@@ -12,7 +12,9 @@ from rest_framework.response import Response
 from accounts.models import User
 
 from .models import Centre, CentreTest, Test
-from .permissions import can_manage_centre
+from scheduling.services import create_default_schedule
+
+from .permissions import can_manage_centre, is_lab_of
 from .serializers import (
     CentreSerializer,
     CentreTestCreateSerializer,
@@ -42,7 +44,10 @@ def _read_through(cache_key, build):
     ),
     post=extend_schema(
         summary="Create a centre",
-        description="LAB accounts only: creates a centre under the caller's own lab.",
+        description=(
+            "LAB accounts only: creates a centre under the caller's own lab, with the default "
+            "weekly slot schedule (its staff then adjust it)."
+        ),
     ),
 )
 class CentreListCreateView(generics.ListCreateAPIView):
@@ -67,12 +72,13 @@ class CentreListCreateView(generics.ListCreateAPIView):
         user = self.request.user
         if user.role != User.Role.LAB or user.lab_id is None:
             raise PermissionDenied("Only lab accounts can create centres.")
-        serializer.save(lab=user.lab)
+        with transaction.atomic():
+            create_default_schedule(serializer.save(lab=user.lab))
 
 
 @extend_schema(
     summary="Update a centre",
-    description="LAB (any centre of its own lab) or CENTRE (its own centre): edit name/location.",
+    description="LAB only (any centre of its own lab): edit name/location.",
 )
 class CentreUpdateView(generics.UpdateAPIView):
     serializer_class = CentreSerializer
@@ -83,8 +89,8 @@ class CentreUpdateView(generics.UpdateAPIView):
 
     def get_object(self):
         centre = super().get_object()
-        if not can_manage_centre(self.request.user, centre):
-            raise PermissionDenied("You can only manage your own centres.")
+        if not is_lab_of(self.request.user, centre):
+            raise PermissionDenied("Only the lab can edit its centres.")
         return centre
 
 
@@ -106,8 +112,8 @@ class CentreUpdateView(generics.UpdateAPIView):
     post=extend_schema(
         summary="Offer a test at a centre",
         description=(
-            "LAB (own lab's centres) or CENTRE (own centre): offer a test from the global catalog "
-            "(`GET /tests/`) at a centre-specific price. 400 if the centre already offers it."
+            "LAB only (own lab's centres): offer a test from the global catalog (`GET /tests/`) at "
+            "a centre-specific price. 400 if the centre already offers it."
         ),
         responses={201: CentreTestSerializer},
     ),
@@ -142,8 +148,8 @@ class CentreTestListCreateView(generics.ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         centre = self._centre()
-        if not can_manage_centre(request.user, centre):
-            raise PermissionDenied("You can only manage tests at your own centres.")
+        if not is_lab_of(request.user, centre):
+            raise PermissionDenied("Only the lab can add tests to its centres.")
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -159,8 +165,9 @@ class CentreTestListCreateView(generics.ListCreateAPIView):
 @extend_schema(
     summary="Update a test's price or availability at a centre",
     description=(
-        "LAB (own lab's centres) or CENTRE (own centre). Set `is_active=false` to stop offering a "
-        "test; rows are never deleted because existing bookings reference them."
+        "LAB (own lab's centres) can change `price` and `is_active`; CENTRE (own centre) can only "
+        "change `is_active`, since prices are set by the lab. Set `is_active=false` to stop "
+        "offering a test; rows are never deleted because existing bookings reference them."
     ),
     responses={200: CentreTestSerializer},
 )
@@ -177,8 +184,11 @@ class CentreTestUpdateView(generics.UpdateAPIView):
 
     def get_object(self):
         centre_test = super().get_object()
-        if not can_manage_centre(self.request.user, centre_test.centre):
+        user = self.request.user
+        if not can_manage_centre(user, centre_test.centre):
             raise PermissionDenied("You can only manage tests at your own centres.")
+        if "price" in self.request.data and not is_lab_of(user, centre_test.centre):
+            raise PermissionDenied("Only the lab can change prices.")
         return centre_test
 
 

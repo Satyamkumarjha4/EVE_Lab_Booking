@@ -10,3 +10,13 @@ def can_manage_centre(user, centre):
     if user.role == User.Role.CENTRE:
         return user.centre_id is not None and centre.id == user.centre_id
     return False
+
+
+def is_lab_of(user, centre):
+    """Only the owning lab sets prices, adds offerings and edits centre details."""
+    return (
+        user.is_authenticated
+        and user.role == User.Role.LAB
+        and user.lab_id is not None
+        and centre.lab_id == user.lab_id
+    )

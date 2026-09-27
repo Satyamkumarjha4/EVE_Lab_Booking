@@ -1,9 +1,20 @@
+from decimal import Decimal
+
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 
 class Lab(models.Model):
     name = models.CharField(max_length=255)
     location = models.CharField(max_length=255)
+    # Kept from a paid booking when the patient cancels after payment or doesn't turn up; the rest
+    # is refunded. Set by the lab itself.
+    transaction_fee_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("5.00"),
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))],
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
