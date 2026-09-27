@@ -7,7 +7,7 @@ from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from kombu.exceptions import OperationalError
 from rest_framework import generics, status
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import NotFound
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -70,12 +70,12 @@ class PaymentOrderCreateView(generics.GenericAPIView):
     summary="Simulate a payment outcome",
     description=(
         "Assignment-mandated endpoint: synchronously resolves an INITIATED payment to SUCCESS or "
-        "FAILED and updates the booking, then enqueues the simulated provider webhook."
+        "FAILED and updates the booking, then enqueues the simulated provider webhook. A FAILED "
+        "outcome can carry the decline reason the customer's bank or UPI app gave."
     ),
     request=SimulatePaymentSerializer,
     responses={
         200: PaymentSerializer,
-        403: DetailSerializer,
         404: DetailSerializer,
         409: DetailSerializer,
     },
@@ -89,6 +89,7 @@ class PaymentSimulateView(APIView):
         serializer.is_valid(raise_exception=True)
         reference = serializer.validated_data["payment_reference"]
         outcome = serializer.validated_data["outcome"]
+        failure_reason = serializer.validated_data.get("failure_reason", "")
 
         payment = get_object_or_404(
             Payment.objects.select_related("booking__centre_test"), reference=reference
@@ -100,20 +101,23 @@ class PaymentSimulateView(APIView):
             user.role == User.Role.CENTRE and booking.centre_test.centre_id == user.centre_id
         )
         if not owns:
-            raise PermissionDenied("You do not have access to this payment.")
+            # 404, not 403: matches the "outside your scope reads as not found" convention
+            # used everywhere else (Booking.objects.for_user(), scheduling's centre lookup),
+            # so an unrelated caller can't use the status code to confirm a reference exists.
+            raise NotFound("Payment not found.")
 
         if payment.status != Payment.Status.INITIATED:
             return _conflict("Payment has already been resolved.")
         if booking.status != Booking.Status.PENDING:
             return _conflict("This booking is no longer awaiting payment.")
 
-        resolved, applied = apply_payment_result(payment, outcome)
+        resolved, applied = apply_payment_result(payment, outcome, failure_reason, actor=user)
         if not applied:
             return _conflict("Payment has already been resolved.")
 
         try:
             deliver_payment_webhook.apply_async(
-                args=[str(resolved.reference), resolved.status],
+                args=[str(resolved.reference), resolved.status, resolved.failure_reason],
                 countdown=random.randint(*WEBHOOK_DELAY_SECONDS),
             )
         except OperationalError:
@@ -156,6 +160,7 @@ class PaymentWebhookView(APIView):
         event_id = serializer.validated_data["event_id"]
         reference = serializer.validated_data["payment_reference"]
         event_status = serializer.validated_data["status"]
+        failure_reason = serializer.validated_data.get("failure_reason", "")
 
         payment = get_object_or_404(Payment, reference=reference)
 
@@ -172,9 +177,20 @@ class PaymentWebhookView(APIView):
                         raw_payload=request.data,
                     )
             except IntegrityError:
+                original = PaymentEvent.objects.get(event_id=event_id)
+                if original.status != event_status or original.raw_payload != request.data:
+                    logger.warning(
+                        "Webhook event %s redelivered for payment %s with a different "
+                        "payload than originally recorded (was %s, now %s) — possible "
+                        "tampering or a provider bug; keeping the original.",
+                        event_id,
+                        reference,
+                        original.status,
+                        event_status,
+                    )
                 return Response({"detail": "Duplicate event, already processed."})
 
-            resolved, applied = apply_payment_result(payment, event_status)
+            resolved, applied = apply_payment_result(payment, event_status, failure_reason)
             if not applied and resolved.status != event_status:
                 logger.warning(
                     "Webhook event %s reports %s for payment %s already resolved as %s; "

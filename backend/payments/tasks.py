@@ -12,12 +12,13 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task
-def deliver_payment_webhook(payment_reference, outcome):
+def deliver_payment_webhook(payment_reference, outcome, failure_reason=""):
     """Simulates the payment provider's async confirmation callback for a payment attempt."""
     payload = {
         "event_id": str(uuid.uuid4()),
         "payment_reference": payment_reference,
         "status": outcome,
+        "failure_reason": failure_reason,
     }
     body = json.dumps(payload).encode()
     headers = {
