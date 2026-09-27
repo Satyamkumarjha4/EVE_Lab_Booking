@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-import { NavBar } from "@/components/nav-bar";
+import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/lib/auth-context";
 
 const geistSans = Geist({
@@ -16,8 +16,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "EVE Diagnostics",
-  description: "Diagnostics test booking demo",
+  title: { default: "EVE Diagnostics — Book lab tests near you", template: "%s · EVE Diagnostics" },
+  description:
+    "Compare prices for lab tests across diagnostic centres in your city and book a slot in minutes.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -26,10 +27,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">
+      <body className="flex min-h-full flex-col">
         <AuthProvider>
-          <NavBar />
-          <main className="mx-auto w-full max-w-4xl flex-1 px-4 py-6">{children}</main>
+          {children}
+          <Toaster position="bottom-right" richColors closeButton />
         </AuthProvider>
       </body>
     </html>
