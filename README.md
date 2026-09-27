@@ -547,3 +547,5 @@ with period deltas, revenue trend, outcomes, top tests and centres, busiest hour
 table with filters and CSV export, price and availability management, centre management, and
 walk-in registration for centre staff. Run `seed_demo_bookings` first so the dashboard has data.
 Details are in [frontend/README.md](frontend/README.md).
+
+
