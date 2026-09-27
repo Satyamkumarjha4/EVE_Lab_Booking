@@ -119,6 +119,18 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
+# Run by the celery-beat service. Both jobs are idempotent sweeps, so a missed or doubled run is
+# harmless.
+CELERY_BEAT_SCHEDULE = {
+    "expire-unpaid-bookings": {
+        "task": "bookings.tasks.expire_unpaid_bookings",
+        "schedule": 300,
+    },
+    "mark-no-shows": {
+        "task": "bookings.tasks.mark_no_shows",
+        "schedule": 300,
+    },
+}
 
 # --- DRF / drf-spectacular ---
 REST_FRAMEWORK = {
@@ -158,6 +170,8 @@ SPECTACULAR_SETTINGS = {
         # PaymentEvent.status and the simulate/webhook outcome fields share the same
         # SUCCESS/FAILED choice set, so they resolve to one canonical enum name.
         "PaymentOutcomeEnum": "payments.serializers.OUTCOME_CHOICES",
+        # BookingEvent.actor_role and the derived `cancellation.by_role` share one choice set.
+        "BookingActorRoleEnum": "bookings.models.BookingEvent.ActorRole",
     },
 }
 
@@ -171,6 +185,16 @@ SIMPLE_JWT = {
 
 # --- CORS (local frontend dev server) ---
 CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=["http://localhost:3000"])
+
+# --- Booking lifecycle & slots ---
+# Every seeded centre is in India; slot rules and opening hours are in this local time.
+CENTRE_TIME_ZONE = "Asia/Kolkata"
+# An unpaid booking holds its slot this long, then is cancelled to free the seat.
+PAYMENT_WINDOW_MINUTES = 30
+# A confirmed booking becomes NO_SHOW this long after its appointment if nobody marked it done.
+NO_SHOW_GRACE_MINUTES = 120
+# Patients must book at least this far ahead; centre staff booking walk-ins are exempt.
+CLIENT_BOOKING_LEAD_MINUTES = 60
 
 # --- Payment webhook simulation ---
 WEBHOOK_SECRET = env("WEBHOOK_SECRET")

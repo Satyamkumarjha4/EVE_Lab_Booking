@@ -80,5 +80,25 @@ services:
         condition: service_healthy
     command: celery -A eve worker -l info
 
+  # Fires the periodic lifecycle sweeps (expire unpaid bookings, mark no-shows) onto the worker.
+  # The schedule file lives in /tmp so it isn't written into the mounted source tree.
+  celery-beat:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - ./backend:/app:z
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A eve beat -l info --schedule /tmp/celerybeat-schedule
+
 volumes:
   postgres_data:
