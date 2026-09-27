@@ -47,6 +47,7 @@ services:
     # makes it private to one container, so web and celery-worker would lock each other out.
     volumes:
       - ./backend:/app:z
+      - ./test_backend:/app/test_backend:z
     ports:
       - "8000:8000"
     depends_on:
