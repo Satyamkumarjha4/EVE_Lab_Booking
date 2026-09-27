@@ -38,6 +38,7 @@ This brings up four containers:
 | `redis` | Redis 7 | `127.0.0.1:6380` → 6379 in-container | remapped from 6379 to avoid clashing with a local Redis; broker (DB 1) + cache (DB 0) share this instance; localhost-only |
 | `web` | Django (runserver) | `8000` | runs `migrate` then `runserver 0.0.0.0:8000` on every start |
 | `celery-worker` | Celery worker, same image as `web` | — | not exposed on the host; `celery -A eve worker -l info` |
+| `celery-beat` | Celery beat scheduler, same image | — | fires the booking sweeps every 5 min (expire unpaid bookings after 30 min, mark no-shows 2 h after the slot); schedule file in `/tmp` |
 
 If your machine has no local Postgres/Redis running, you can change the port mappings in
 `docker-compose.yml` back to `127.0.0.1:5432:5432` / `127.0.0.1:6379:6379`; nothing else depends
@@ -119,6 +120,7 @@ healthchecks before `web`/`celery-worker` are allowed to start.
 ```bash
 docker compose logs -f web              # Django server log (requests, migrations, tracebacks)
 docker compose logs -f celery-worker    # Celery worker log
+docker compose logs -f celery-beat      # when the lifecycle sweeps were sent
 docker compose logs -f db               # Postgres log
 docker compose logs -f redis            # Redis log
 docker compose logs -f                  # everything, interleaved
@@ -162,9 +164,8 @@ docker compose down -v       # also delete the Postgres volume (fresh DB next `u
 
 ## Running the frontend
 
-A Next.js (App Router) frontend lives in `frontend/`, built early/out of order (before backend
-Phases 5-7) so the UI could be previewed sooner — see `docs/PHASES.md` Phase 8 and
-`frontend/README.md` for full details. Quick start:
+A Next.js (App Router) frontend lives in `frontend/`: a patient booking site plus a business
+analytics dashboard. See `docs/FRONTEND_DESIGN.md` and `frontend/README.md` for full details. Quick start:
 
 ```bash
 cd frontend
@@ -174,7 +175,8 @@ npm run dev   # http://localhost:3000
 ```
 
 Requires the backend running (`docker compose up -d --build`) with `seed_demo_data` run at least
-once. The backend has `django-cors-headers` configured to allow `http://localhost:3000` by default.
+once. Also run `docker compose exec web python manage.py seed_demo_bookings` so the business
+dashboard has 90 days of history to chart (it does nothing if demo bookings already exist). The backend has `django-cors-headers` configured to allow `http://localhost:3000` by default.
 The frontend is not (yet) part of `docker-compose.yml`; it's a separate local dev server.
 
 ## Troubleshooting
@@ -185,6 +187,7 @@ The frontend is not (yet) part of `docker-compose.yml`; it's a separate local de
 | `web` can't connect to Postgres on a fresh clone | `backend/.env` `POSTGRES_*` doesn't match the `db` service (both default to `eve`/`eve`/`eve`) |
 | `PermissionError` / `ModuleNotFoundError` for project files inside a container | SELinux mount label: the volumes must use `:z`, not `:Z` (see above) |
 | Payments succeed but no `PaymentEvent` rows appear | Check `docker compose logs celery-worker` for `Webhook delivery failed`. A `DisallowedHost` 400 means `web` is missing from `ALLOWED_HOSTS` |
+| An unpaid demo booking turned CANCELLED on its own | Expected: `celery-beat` cancels PENDING bookings after 30 min ("Payment not completed within 30 minutes") to free the slot. Confirmed bookings become NO_SHOW 2 h after their slot unless marked completed |
 | `429 Too Many Requests` while demoing | Login/signup allow 5/min per IP. Wait a minute, or run `docker compose exec redis redis-cli -n 0 FLUSHDB` |
 
 ## Current status
@@ -192,8 +195,10 @@ The frontend is not (yet) part of `docker-compose.yml`; it's a separate local de
 Phases 0–8 are complete: bootstrap and Docker, JWT auth, the catalog (reads plus Lab/Centre
 management) with demo data and logins, role-scoped bookings, payment orders and simulation, the
 Celery-delivered HMAC webhook with `PaymentEvent` idempotency, Redis catalog caching, rate
-limiting, the final audit and docs, and the bonus Next.js frontend. The root `README.md` is the
-entry point.
+limiting, the final audit and docs, and the bonus Next.js frontend. On top of that: the full visit
+lifecycle (completed, report delivered, no-show) with a status history and reasons, lab-level
+transaction fees with partial refunds, per-centre slot capacity, and walk-in patient registration.
+The root `README.md` is the entry point.
 
 Deferred by design (not oversights; see `docs/ARCHITECTURE.md` §10 and README §12): structured
 logging (stdlib logging only), pagination, and webhook retry/backoff.

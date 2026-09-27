@@ -13,12 +13,16 @@ erDiagram
     CENTRE ||--o{ BOOKING : "fulfilled at"
     CENTRE_TEST ||--o{ BOOKING : "ordered as"
     BOOKING ||--o| PAYMENT : "paid via"
+    BOOKING ||--o{ BOOKING_EVENT : "history"
+    USER ||--o{ BOOKING_EVENT : "acted (nullable = system)"
     PAYMENT ||--o{ PAYMENT_EVENT : "receives"
+    CENTRE ||--o{ SLOT_RULE : "takes bookings per"
 
     LAB {
         uuid id PK
         string name
         string location
+        decimal transaction_fee_percent "0-100, default 5"
         timestamp created_at
     }
 
@@ -52,6 +56,11 @@ erDiagram
         enum role "PLATFORM_ADMIN | LAB | CENTRE | CLIENT"
         uuid lab_id FK "nullable, set when role=LAB"
         uuid centre_id FK "nullable, set when role=CENTRE"
+        string first_name
+        string last_name
+        string phone "patient details (walk-ins)"
+        date date_of_birth "nullable"
+        enum gender "MALE | FEMALE | OTHER, blank"
         timestamp created_at
     }
 
@@ -61,9 +70,29 @@ erDiagram
         uuid centre_test_id FK
         datetime appointment_at
         decimal amount
-        enum status "PENDING | CONFIRMED | FAILED | CANCELLED"
+        enum status "PENDING | CONFIRMED | FAILED | CANCELLED | COMPLETED | NO_SHOW | REPORT_DELIVERED"
         timestamp created_at
         timestamp updated_at
+    }
+
+    BOOKING_EVENT {
+        uuid id PK
+        uuid booking_id FK
+        enum status "the status entered"
+        uuid actor_id FK "nullable USER"
+        enum actor_role "CLIENT | CENTRE | LAB | PLATFORM_ADMIN | SYSTEM"
+        string note "cancellation / failure reason"
+        timestamp created_at
+    }
+
+    SLOT_RULE {
+        uuid id PK
+        uuid centre_id FK
+        int weekday "0-6, XOR date"
+        date date "one-off override, XOR weekday"
+        time start_time "30-min aligned, centre local time"
+        time end_time
+        int capacity "patients per 30-min slot, 0 = closed"
     }
 
     PAYMENT {
@@ -74,6 +103,9 @@ erDiagram
         enum method "CARD | UPI"
         enum status "INITIATED | SUCCESS | FAILED"
         enum refund_status "NONE | SIMULATED_REFUNDED"
+        enum failure_reason "blank | INSUFFICIENT_FUNDS | CARD_DECLINED | ..."
+        decimal refund_amount
+        decimal fee_amount "refund_amount + fee_amount = amount once refunded"
         timestamp created_at
         timestamp updated_at
     }
@@ -115,8 +147,18 @@ erDiagram
   deviation from this diagram. `User` also drops `username` in favor of `email` as the login field
   (`USERNAME_FIELD = "email"`), matching this diagram's `USER.email` (there's no `USER.username`
   drawn above).
-- **`BOOKING.client_id` is implemented as nullable**, not required as drawn above — Architecture doc
-  §2 has a Centre create bookings on its own behalf for walk-in patients, who typically have no
-  `User` account to point `client_id` at. Rather than inventing an undocumented patient-identity
-  field, a Centre-created booking simply has `client = null`; ownership/visibility for it is derived
-  from `centre_test`'s centre instead of from `client`.
+- **`BOOKING.client_id` is nullable** only for legacy walk-ins. Centre staff now identify every
+  walk-in patient by email (`GET /patients/lookup/`) or register them (`POST /patients/`, a CLIENT
+  `USER` with no usable password plus name/phone/DOB/gender), so new walk-ins always point at a
+  patient. Visibility for centre and lab is still derived from `centre_test`'s centre.
+- **`BOOKING_EVENT` is append-only history**, one row per status change, with who did it
+  (`actor_role`, and `actor` unless the system did it) and why (`note`). The cancellation reason and
+  payment failure reason live here, so the timeline in the UI is the real record rather than a guess
+  from timestamps. `PAYMENT.failure_reason` also keeps the structured decline code for analytics.
+- **`SLOT_RULE` holds capacity, not slots.** A rule says "between these times, N patients per
+  30-minute slot", either for a weekday or for one date. If any date rules exist for a date they
+  replace that weekday's rules entirely (a holiday is one rule with capacity 0). Slots are derived on
+  read (`GET /centres/{id}/slots/`), and a booking's seat is counted from `BOOKING` rows, so there is
+  no second source of truth to keep in sync.
+- **The fee lives on `LAB`**, and the refund split is snapshotted onto `PAYMENT`
+  (`refund_amount`/`fee_amount`), so a later fee change never rewrites past refunds.

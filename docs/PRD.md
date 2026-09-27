@@ -7,7 +7,7 @@ specifies a small backend service (diagnostic test bookings + simulated payments
 3–4 hours, with a list of optional bonus items.
 
 We are treating this as a **~10–12 hour portfolio-grade submission**: the backend is the graded
-deliverable and must be complete, correct, and well-tested; the frontend is a minimal add-on built
+deliverable and must be complete, correct, and well-tested; the frontend is a bonus add-on built
 *after* the backend is solid, to demonstrate integration ability and UX sense (brownie points, not
 graded criteria).
 
@@ -59,7 +59,12 @@ user record.
 
 ### Centre
 - Log in.
-- View bookings scheduled at the centre (read-only).
+- View bookings scheduled at the centre.
+- Register walk-in patients (look up by email, or capture name, phone, date of birth, gender) and
+  book and take payment for them.
+- Mark a test completed when the patient comes in, and the report delivered afterwards.
+- Manage the centre's slots: how many patients per 30-minute slot, by weekday and per date.
+- Switch a test's availability at the centre. Prices are set by the lab, not the centre.
 
 ### Platform / System
 - Simulate a payment outcome (SUCCESS/FAILED) at runtime, driven by a manual "customer" choice in
@@ -70,16 +75,21 @@ user record.
 ## 4. Booking Lifecycle
 
 ```
-PENDING → (payment success)  → CONFIRMED
-PENDING → (payment failure)  → FAILED
-PENDING/CONFIRMED → (cancel by Client or Lab) → CANCELLED
+PENDING → (payment success)  → CONFIRMED ("awaiting arrival")
+PENDING → (payment failure, with the bank's reason) → FAILED
+PENDING → (unpaid for 30 minutes) → CANCELLED
+PENDING/CONFIRMED → (cancel by Client or Lab, with a reason, before the appointment) → CANCELLED
+CONFIRMED → (patient came, test done: Centre/Lab) → COMPLETED → (report shared) → REPORT_DELIVERED
+CONFIRMED → (appointment + 2 h passed without a visit: automatic) → NO_SHOW
 ```
 
-- A booking is created in `PENDING` state before any payment attempt exists.
+- A booking is created in `PENDING` state before any payment attempt exists, in a free slot.
 - Only `PENDING` bookings can have a payment order created against them.
-- `CONFIRMED` bookings can still be cancelled (triggers a simulated refund on the payment).
-- `FAILED` and `CANCELLED` are terminal; a new booking must be created to retry.
-- Centre cannot transition booking state at all (read-only role).
+- A paid booking cancelled by the patient, or a no-show, is refunded minus the lab's transaction
+  fee (a percentage each lab sets). A lab cancellation is refunded in full.
+- `FAILED`, `CANCELLED`, `NO_SHOW` and `REPORT_DELIVERED` are terminal; a new booking must be
+  created to retry.
+- Centres cannot cancel; they record the visit and the report.
 
 ## 5. Payment Simulation UX (product-level requirement)
 

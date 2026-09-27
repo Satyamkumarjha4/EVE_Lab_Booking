@@ -4,7 +4,8 @@ A backend service for booking diagnostic tests at lab-owned centres and paying f
 simulated payment provider, including an **idempotent payment webhook**.
 
 Django + DRF · PostgreSQL · Redis · Celery · JWT · Swagger · pytest, all running under Docker
-Compose. A minimal Next.js frontend is included as a bonus in [`frontend/`](frontend/README.md).
+Compose. A bonus Next.js frontend in [`frontend/`](frontend/README.md) provides a patient booking site
+and a business analytics dashboard on top of this API.
 
 **Highlights**
 
@@ -21,7 +22,7 @@ Compose. A minimal Next.js frontend is included as a bonus in [`frontend/`](fron
   permission matrix is enforced in querysets, so bookings outside your scope read as 404.
 - **Redis read-through cache** on the catalog with signal-based invalidation, plus **DRF scoped
   rate limiting**.
-- **107 tests**, including one that fails the build if the OpenAPI schema generates any warning.
+- **178 tests**, including one that fails the build if the OpenAPI schema generates any warning.
 
 ---
 
@@ -49,8 +50,9 @@ Requirements: Docker Engine with the Compose plugin. Nothing else needs to be in
 
 ```bash
 cp backend/.env.example backend/.env         # dev defaults that work out of the box
-docker compose up -d --build                 # db, redis, web, celery-worker
+docker compose up -d --build                 # db, redis, web, celery-worker, celery-beat
 docker compose exec web python manage.py seed_demo_data
+docker compose exec web python manage.py seed_demo_bookings   # optional: 90 days of booking history
 ```
 
 | What | Where |
@@ -69,7 +71,14 @@ centre-specific prices, plus three demo logins that share the password **`EveDem
 |---|---|---|
 | `client@demo.eve` | CLIENT | Books and pays for their own bookings |
 | `lab@demo.eve` | LAB | Apollo Diagnostics: sees and cancels bookings at all 3 Apollo centres, manages their catalog |
-| `centre@demo.eve` | CENTRE | Apollo – Connaught Place: walk-in bookings and payments, read-only on cancellation |
+| `centre@demo.eve` | CENTRE | Apollo – Connaught Place: walk-in patients and payments, marks tests completed and reports delivered, manages its slots and test availability; cannot cancel or change prices |
+
+`seed_demo_bookings` (run after `seed_demo_data`) backfills about 1,000 bookings over the last 90
+days across every centre, within each centre's slot capacity, with matching payments, refund
+splits, status histories and cancellation/decline reasons. The demo lab gets the busiest share, and
+`client@demo.eve` gets bookings in every status. It also adds `patient1…8@demo.eve` (same
+password). It does nothing if demo bookings already exist. Its purpose is to give the frontend's
+analytics dashboard something to show.
 
 More operational detail (ports, logs, psql/redis-cli access, troubleshooting) is in
 [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
@@ -123,28 +132,36 @@ All request and response bodies are JSON. Authenticated endpoints expect
 |---|---|---|---|
 | GET | `/centres/` | public | A CENTRE login sees only its own centre. Cached |
 | POST | `/centres/` | LAB | Creates a centre under the caller's own lab |
-| PATCH | `/centres/{id}/` | LAB (own lab) · CENTRE (own) | Edit name or location |
+| PATCH | `/centres/{id}/` | LAB (own lab) | Edit name or location |
 | GET | `/centres/{id}/tests/` | public | Active tests with this centre's prices. `?include_inactive=true` also returns deactivated tests, for that centre's managers only. Cached |
-| POST | `/centres/{id}/tests/` | LAB (own lab) · CENTRE (own) | Offer a test from the global catalog at a centre-specific price |
-| PATCH | `/centres/{id}/tests/{centre_test_id}/` | LAB (own lab) · CENTRE (own) | Change `price` / `is_active` |
+| POST | `/centres/{id}/tests/` | LAB (own lab) | Offer a test from the global catalog at a centre-specific price |
+| PATCH | `/centres/{id}/tests/{centre_test_id}/` | LAB (own lab) · CENTRE (own, `is_active` only) | Change `price` / `is_active`. Prices are the lab's call: a centre sending `price` gets 403 |
+| GET · PATCH | `/labs/mine/` | LAB | The lab's `transaction_fee_percent` (0–100), kept on patient cancellations of paid bookings and on no-shows |
+| GET | `/centres/{id}/slots/` | public | Every 30-minute slot for `?days=` (≤31) from `?from=` with capacity, seats booked, remaining and whether it's bookable |
+| GET · POST | `/centres/{id}/slot-rules/` | CENTRE (own) · LAB (own centres, read-only) | Seats per slot for a time range, by `weekday` or as a one-off `date` override (which replaces that day's weekly rules) |
+| PATCH · DELETE | `/centres/{id}/slot-rules/{rule_id}/` | CENTRE (own) | Edit or remove a range |
+| GET | `/patients/lookup/?email=` | CENTRE · LAB | Find a patient (CLIENT) for a walk-in; 404 if none. Deliberately platform-wide (any centre/lab can find any patient, not just one it's booked before) since a walk-in isn't necessarily a returning one — rate-limited tighter than `default` because of that |
+| POST | `/patients/` | CENTRE · LAB | Register a walk-in patient: email, name, phone, date of birth, gender |
 | GET | `/tests/` | public | The global test catalog (curated by the platform admin) |
 
 **Bookings**
 
 | Method | Path | Who | Notes |
 |---|---|---|---|
-| POST | `/bookings/` | CLIENT (for self) · CENTRE (walk-in, own centre) | `{centre_test, appointment_at}`. Amount is taken from the centre's price. Starts PENDING |
-| GET | `/bookings/` | any role | Client: own. Lab: all its centres. Centre: its centre. Admin: all. Newest first |
+| POST | `/bookings/` | CLIENT (for self) · CENTRE (walk-in, own centre) | `{centre_test, appointment_at}`, plus `patient` for centres. `appointment_at` must be a free slot: 400 if misaligned/closed/too soon, 409 if full. Amount is taken from the centre's price. Starts PENDING |
+| GET | `/bookings/` | any role | Client: own. Lab: all its centres. Centre: its centre. Admin: all. Newest first. Each booking carries its patient, payment summary (incl. refund split and decline reason) and status history |
 | GET | `/bookings/{id}/` | any role | Same scoping. Bookings outside your scope return 404 |
-| POST | `/bookings/{id}/cancel/` | CLIENT (own) · LAB (own centres) | PENDING/CONFIRMED → CANCELLED. A paid booking gets a simulated refund |
+| POST | `/bookings/{id}/cancel/` | CLIENT (own) · LAB (own centres) | `{reason}`, before the appointment. PENDING/CONFIRMED → CANCELLED. Paid bookings are refunded: in full if the lab cancels, minus the lab's fee if the patient does |
+| POST | `/bookings/{id}/complete/` | CENTRE (own) · LAB (own centres) | The patient came in: CONFIRMED → COMPLETED, from the appointment day on |
+| POST | `/bookings/{id}/deliver-report/` | CENTRE (own) · LAB (own centres) | COMPLETED → REPORT_DELIVERED |
 
 **Payments**
 
 | Method | Path | Who | Notes |
 |---|---|---|---|
 | POST | `/payments/orders/` | CLIENT / CENTRE owning the booking | `{booking, method: CARD\|UPI}` → an INITIATED order. **201** when new; **200** when an existing INITIATED order is resumed (never a second payment) |
-| POST | `/payments/` | CLIENT / CENTRE owning the payment | `{payment_reference, outcome: SUCCESS\|FAILED}` resolves the payment and booking synchronously, then enqueues the webhook |
-| POST | `/payments/webhook/` | payment provider (HMAC-signed, no JWT) | `{event_id, payment_reference, status}`, idempotent on `event_id` |
+| POST | `/payments/` | CLIENT / CENTRE owning the payment | `{payment_reference, outcome: SUCCESS\|FAILED, failure_reason?}` resolves the payment and booking synchronously, then enqueues the webhook. `failure_reason` (e.g. `INSUFFICIENT_FUNDS`) defaults to `CARD_DECLINED` |
+| POST | `/payments/webhook/` | payment provider (HMAC-signed, no JWT) | `{event_id, payment_reference, status, failure_reason?}`, idempotent on `event_id` |
 
 **Status code conventions:** `400` validation error · `401` missing or invalid token · `403` your
 role may not do this · `404` does not exist *or* is outside your scope · `409` the resource's state
@@ -221,13 +238,18 @@ CENTRE="Authorization: Bearer $(login centre@demo.eve)"
 
 curl -s $API/bookings/ -H "$LAB" | jq length            # every booking at Apollo's 3 centres
 
-# A centre can register a walk-in booking but cannot cancel it
+# A centre books a walk-in for a known patient in a free slot, but cannot cancel it
 APOLLO_CP=$(curl -s $API/centres/ -H "$CENTRE" | jq '.[0].id')
 WALK_IN_TEST=$(curl -s $API/centres/$APOLLO_CP/tests/ | jq '.[0].id')
+PATIENT=$(curl -s "$API/patients/lookup/?email=client@demo.eve" -H "$CENTRE" | jq .id)
+SLOT=$(curl -s "$API/centres/$APOLLO_CP/slots/?days=7" | jq -r '[.[].slots[] | select(.bookable)][0].start')
 WALK_IN=$(curl -s -X POST $API/bookings/ -H "$CENTRE" -H 'Content-Type: application/json' \
-  -d "{\"centre_test\": $WALK_IN_TEST, \"appointment_at\": \"2030-01-16T10:00:00Z\"}" | jq .id)
-curl -s -o /dev/null -w '%{http_code}\n' -X POST $API/bookings/$WALK_IN/cancel/ -H "$CENTRE"   # 403
-curl -s -X POST $API/bookings/$WALK_IN/cancel/ -H "$LAB" | jq .status                        # "CANCELLED"
+  -d "{\"centre_test\": $WALK_IN_TEST, \"appointment_at\": \"$SLOT\", \"patient\": $PATIENT}" | jq .id)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $API/bookings/$WALK_IN/cancel/ -H "$CENTRE" \
+  -H 'Content-Type: application/json' -d '{"reason": "x"}'                                  # 403
+curl -s -X POST $API/bookings/$WALK_IN/cancel/ -H "$LAB" -H 'Content-Type: application/json' \
+  -d '{"reason": "Analyser under maintenance"}' | jq .cancellation
+# {"reason": "Analyser under maintenance", "by_role": "LAB", "at": "..."}
 
 # The lab re-prices a test at one of its centres (the change only affects new bookings)
 CT=$(curl -s $API/centres/$APOLLO_CP/tests/ | jq '.[0].id')
@@ -247,18 +269,22 @@ erDiagram
     USER ||--o{ BOOKING : "books (role=CLIENT)"
     CENTRE_TEST ||--o{ BOOKING : "booked as"
     BOOKING ||--o| PAYMENT : "paid via"
+    BOOKING ||--o{ BOOKING_EVENT : "status history"
     PAYMENT ||--o{ PAYMENT_EVENT : "confirmed by"
+    CENTRE ||--o{ SLOT_RULE : "seats per slot"
 ```
 
 | Table | Key columns | Constraints |
 |---|---|---|
-| `Lab` | name, location | |
+| `Lab` | name, location, **transaction_fee_percent** | 0–100 |
 | `Centre` | lab FK, name, location | `lab` PROTECT |
 | `Test` | name, description | `name` unique: the global catalog |
 | `CentreTest` | centre FK, test FK, **price**, is_active | unique `(centre, test)` |
-| `User` | **email** (login), role, lab FK?, centre FK? | `email` unique, stored lowercased |
-| `Booking` | client FK?, centre_test FK, appointment_at, **amount**, status | `centre_test` PROTECT |
-| `Payment` | booking **OneToOne**, **reference** (UUID), amount, method, status, refund_status | `reference` unique; one payment per booking |
+| `User` | **email** (login), role, lab FK?, centre FK?, first/last name, phone, date_of_birth, gender | `email` unique, stored lowercased |
+| `Booking` | client FK?, centre_test FK, appointment_at, **amount**, status (7 states) | `centre_test` PROTECT |
+| `BookingEvent` | booking FK, status, actor FK?, actor_role, **note** (reason), created_at | append-only |
+| `SlotRule` | centre FK, weekday **or** date, start_time, end_time, **capacity** | check: exactly one of weekday/date; end > start |
+| `Payment` | booking **OneToOne**, **reference** (UUID), amount, method, status, refund_status, failure_reason, refund_amount, fee_amount | `reference` unique; one payment per booking |
 | `PaymentEvent` | **event_id** (UUID), payment FK, status, raw_payload (JSON), processed_at | `event_id` unique: the idempotency key |
 
 Design decisions:
@@ -273,8 +299,13 @@ Design decisions:
 - **Two different unique keys around payments.** `Payment.reference` identifies a *payment
   attempt*; `PaymentEvent.event_id` identifies *one delivery* of a status update. Collapsing them
   would make a legitimate second event about the same payment look like a duplicate.
-- **`Booking.client` is nullable** because a Centre can register a walk-in patient who has no
-  account. Visibility for those bookings comes from the centre.
+- **Walk-ins are real patients.** Centre staff look a patient up by email or register them (a
+  CLIENT account without a password), so every new walk-in has a `client`. The column stays
+  nullable for walk-ins booked before this existed.
+- **History is its own table.** Every status change appends a `BookingEvent` with who did it and
+  why, which is where cancellation and payment-decline reasons live.
+- **Slots are derived, not stored.** `SlotRule` stores capacity per time range; seats taken are
+  counted from bookings under a Centre row lock, so there's nothing to keep in sync.
 - **`PROTECT` on catalog FKs** means a centre or test that has bookings can't be deleted out from
   under them; they're deactivated instead.
 - Integer `BigAutoField` PKs throughout; the public payment identifier is the UUID `reference`.
@@ -339,6 +370,17 @@ payment lands after the booking was cancelled, the capture is recorded and marke
 | Someone else's booking or payment | 400 ("does not exist") on order creation; 403 on simulate; 404 on booking detail and cancel | `test_payment_orders.py`, `test_payment_simulate.py`, `test_bookings_*.py` |
 | Invalid or non-existent booking id | 404 | `test_bookings_list.py`, `test_bookings_cancel.py` |
 | Cancel an already CANCELLED or FAILED booking | 409 | `test_bookings_cancel.py` |
+| Cancel without a reason; cancel after the appointment time | 400; 409 | `test_bookings_cancel.py` |
+| Patient cancels a paid booking vs. the lab cancels it | Refund minus the lab's fee vs. full refund, split stored on the payment | `test_bookings_cancel.py` |
+| Patient doesn't turn up | NO_SHOW automatically 2 h after the slot, refund minus fee | `test_lifecycle_tasks.py` |
+| Checkout abandoned | Booking cancelled after 30 min, freeing the seat; a later capture is refunded in full | `test_lifecycle_tasks.py` |
+| Completing before the appointment day, or delivering a report for an uncompleted test | 409 | `test_booking_lifecycle.py` |
+| Two patients racing for the last seat in a slot | Centre row lock serializes them; the second gets 409 | `test_bookings_create.py` |
+| Appointment off the 30-minute grid, outside opening hours, or less than an hour ahead (patients) | 400 | `test_bookings_create.py` |
+| Overlapping or misaligned slot rules; the lab trying to edit a centre's slots | 400; 403 | `scheduling/tests/test_slot_rules.py` |
+| Centre changing a price or adding a test | 403 (availability toggle still allowed) | `catalog/tests/test_catalog_manage.py` |
+| Walk-in email lookup hitting a staff account | 404 (only patients are returned) | `accounts/tests/test_patients.py` |
+| Decline with no reason given | Stored as `CARD_DECLINED` | `payments/tests/test_failure_reasons.py` |
 | Centre tries to cancel; Lab or Admin tries to book | 403 | `test_bookings_cancel.py`, `test_bookings_create.py` |
 | Booking an inactive test, or an appointment in the past | 400 | `test_bookings_create.py` |
 | Signup trying to set `role` | Ignored; always CLIENT | `test_signup.py` |
@@ -373,15 +415,16 @@ client-supplied `X-Forwarded-For`, which would otherwise let anyone reset their 
 ## 9. Tests
 
 ```bash
-docker compose exec web pytest          # 107 tests, ~20 s
+docker compose exec web pytest          # 178 tests, ~45 s
 ```
 
 | Area | Tests | What's covered |
 |---|---|---|
-| accounts | 22 | signup and login validation, case-insensitive email, token refresh, `/auth/me/`, throttling |
-| catalog | 32 | role-scoped reads, Lab/Centre catalog management, cache hits and invalidation, seed command |
-| bookings | 22 | creation rules per role, scoped list and detail, cancellation matrix, terminal states |
-| payments | 26 | orders and resume, simulate, webhook idempotency, ordering and atomicity, Celery task signing |
+| accounts | 30 | signup and login validation, case-insensitive email, token refresh, `/auth/me/`, throttling, walk-in patient lookup/registration |
+| catalog | 40 | role-scoped reads, Lab-only pricing vs. centre availability, lab fee settings, cache hits and invalidation, seed command |
+| bookings | 56 | creation rules and slot capacity, scoped list and detail, cancellation reasons and refund split, complete/report transitions, no-show and payment-window sweeps, demo-history seed command |
+| payments | 30 | orders and resume, simulate, webhook idempotency, ordering and atomicity, Celery task signing, decline reasons |
+| scheduling | 17 | slot rule permissions and validation, weekly vs. date overrides, seats booked/remaining |
 | core | 5 | health check, root page, **OpenAPI schema generates with zero warnings** |
 
 The tests run against the real PostgreSQL and Redis containers (row locks and `delete_pattern`
@@ -416,12 +459,26 @@ The task itself is unit-tested separately.
 
 In place: hashed passwords with Django's validators (length, common, numeric, similarity to the
 email); short-lived JWTs; object-level scoping in querysets (other users' bookings read as "not
-found", so sequential ids can't be probed, and payments are addressed by random UUID references);
-an HMAC-signed webhook with constant-time comparison;
+found", so sequential ids can't be probed, and payments are addressed by random UUID references
+— including `/payments/`'s ownership check, which now also answers "not found" rather than
+"forbidden" for a caller who isn't the payment's owner, so it can't be used to confirm a
+reference exists); an HMAC-signed webhook with constant-time comparison;
 rate limits that can't be reset through `X-Forwarded-For`; no fallback secrets (the app refuses to
 start without `SECRET_KEY` and `WEBHOOK_SECRET`); Postgres and Redis published on `127.0.0.1` only.
 The last one matters because Redis is also the Celery broker, and anyone who could reach it could
 enqueue a webhook task that the worker would sign with the real secret.
+
+`/patients/lookup/` is deliberately platform-wide by design (see §3) rather than scoped to a
+centre/lab relationship, since a walk-in patient may never have visited that centre before; the
+tradeoff is mitigated with its own tighter throttle scope (`20/min` vs. the `100/min` default) and
+a lookup miss that no longer leaks the internal model name in its error message. A tampered
+webhook redelivery — the same `event_id`, a validly recomputed signature, but a different
+`status`/payload than the original — is accepted as a no-op (the first, genuine result stays
+authoritative) but is now also logged as a distinct warning rather than being indistinguishable
+from an ordinary duplicate, since that combination can only happen if `WEBHOOK_SECRET` itself has
+leaked. `/api/schema/` and `/api/schema/swagger-ui/` are intentionally left public with no auth
+wrapper — they expose endpoint shapes for reviewer convenience (see §1's Quick start), not any
+data or secret.
 
 Known limitations of this dev setup (see §12): `DEBUG=True`, Django's `runserver`, containers
 running as root, no TLS, and no JWT revocation. A captured webhook request *can* be replayed, but
@@ -445,13 +502,14 @@ and TLS; refresh-token rotation with a blacklist (real logout); per-account logi
 of per-IP throttling; a timestamp inside the webhook signature to bound the replay window; a CI
 pipeline running the suite and the schema check on every push.
 
-**Product and domain:** retrying payment on the same booking (multiple attempts per booking);
-expiring stale PENDING bookings with Celery beat; appointment slots and capacity per centre;
-patient details on walk-in bookings; an audit trail of state transitions; Flower and metrics for
-the worker.
+**Product and domain:** retrying payment on the same booking (multiple attempts per booking); a
+way for walk-in patients registered at the desk (no password) to claim their account; per-test
+slot capacity (today capacity is per centre and time, regardless of test); centres in other time
+zones (all run on `Asia/Kolkata` today); Flower and metrics for the worker.
 
-**Frontend:** a persistent session via an httpOnly refresh cookie (today a hard reload logs you
-out), a Lab catalog-management screen, frontend tests, and a `frontend` service in compose.
+**Frontend:** server-side search and analytics endpoints (catalog search and dashboard aggregates
+run client-side today, see [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md) §7), an httpOnly
+refresh cookie instead of `localStorage`, frontend tests, and a `frontend` service in compose.
 
 ## 13. Repository layout and further docs
 
@@ -464,6 +522,8 @@ backend/                 Django project (the graded deliverable)
   core/                  health check, shared serializers
   eve/                   settings, URLs, Celery app
 frontend/                Next.js bonus UI (see frontend/README.md)
+test_backend/            Test suite, mirrors backend/'s app structure (moved out so backend/
+                          holds only application code)
 docs/                    PRD, architecture, ER diagram, frontend design, phase plan, run guide
 docker-compose.yml
 ```
@@ -476,8 +536,13 @@ docker-compose.yml
 | [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | Running, ports, logs, DB/Redis access, troubleshooting |
 | [docs/PHASES.md](docs/PHASES.md) | Build order and what each phase delivered |
 | [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md) | Scope of the bonus frontend |
+| [docs/API_DOC.md](docs/API_DOC.md) | Every endpoint: method, auth, request/response, error codes |
 
 **Frontend (bonus).** `cd frontend && cp .env.local.example .env.local && npm install && npm run
-dev`, then open http://localhost:3000 and log in with any demo account. It covers signup and login,
-browsing, booking, the card/UPI checkout with *Simulate Success / Failure*, and a role-aware
-bookings dashboard. Details are in [frontend/README.md](frontend/README.md).
+dev`, then open http://localhost:3000. Patients (`/login`) can search tests, filter by city, lab
+and category, compare centre prices, book a slot, and pay through the card/UPI checkout with a
+sandbox *Approve / Decline* step. Businesses (`/business/login`) get an analytics dashboard (KPIs
+with period deltas, revenue trend, outcomes, top tests and centres, busiest hours), a bookings
+table with filters and CSV export, price and availability management, centre management, and
+walk-in registration for centre staff. Run `seed_demo_bookings` first so the dashboard has data.
+Details are in [frontend/README.md](frontend/README.md).

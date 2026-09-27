@@ -46,17 +46,23 @@ required for this scope but noted as a natural extension. Standard `/auth/signup
 | Action | Client | Lab | Centre | Platform Admin |
 |---|---|---|---|---|
 | Browse centres/tests | ✅ | ✅ | ✅ (own) | ✅ |
-| Create booking | ✅ (self) | ❌ | ✅ (own) | ❌ |
-| Cancel booking | ✅ (own) | ✅ (own centres' bookings) | ❌ | ❌ |
+| Create booking | ✅ (self) | ❌ | ✅ (own centre, for a named patient) | ❌ |
+| Look up / register walk-in patients | ❌ | ✅ | ✅ | ❌ |
+| Cancel booking (before the appointment, with a reason) | ✅ (own) | ✅ (own centres' bookings) | ❌ | ❌ |
+| Mark test completed / report delivered | ❌ | ✅ (own centres) | ✅ (own) | ❌ |
 | View bookings | own only | own centres' | own centre's | all |
-| Manage centre/test catalog | ❌ | ✅ (own centres; only Lab can create centres) | ✅ (own) | ✅ (Django admin; also curates the global `Test` list) |
+| Create/edit centres, add tests, set prices | ❌ | ✅ (own lab) | ❌ | ✅ (Django admin; also curates the global `Test` list) |
+| Switch a test's availability | ❌ | ✅ (own centres) | ✅ (own) | ✅ (Django admin) |
+| Edit slot rules | ❌ | read-only (own centres) | ✅ (own) | ✅ (Django admin) |
+| Set the lab's transaction fee % | ❌ | ✅ | ❌ | ✅ (Django admin) |
 | Trigger payment | ✅ (own booking) | ❌ | ✅ (own) | ❌ |
 | Receive webhook | n/a (system-to-system, no user auth — see §5.3) | | | |
 
 ## 3. Domain Model Summary
 
 See `docs/ER_DIAGRAM.md` for the full diagram. Entities: `Lab`, `Centre`, `Test`, `CentreTest`
-(through table with price), `User`, `Booking`, `Payment`, `PaymentEvent`.
+(through table with price), `User`, `Booking`, `BookingEvent` (status history), `Payment`,
+`PaymentEvent`, `SlotRule` (per-centre capacity).
 
 Key design choice: **tests are a global catalog, pricing is per-centre.** `CentreTest` carries
 `price` so the same logical test (e.g. "Lipid Profile") can be priced differently across centres,
@@ -73,16 +79,28 @@ GET    /auth/me/
 
 GET    /centres/                      list centres (public; CENTRE login sees own)
 POST   /centres/                      lab creates a centre under its own lab
-PATCH  /centres/{id}/                 lab (own lab) / centre (own): name, location
+PATCH  /centres/{id}/                 lab (own lab): name, location
 GET    /centres/{id}/tests/           active tests + price at a centre (?include_inactive for managers)
-POST   /centres/{id}/tests/           lab/centre managers: offer a global Test at a centre price
-PATCH  /centres/{id}/tests/{ct_id}/   lab/centre managers: price, is_active
+POST   /centres/{id}/tests/           lab: offer a global Test at a centre price
+PATCH  /centres/{id}/tests/{ct_id}/   lab: price, is_active · centre (own): is_active only
 GET    /tests/                        global test catalog
+GET    /labs/mine/  PATCH             lab: name, transaction_fee_percent
 
-POST   /bookings/                     create booking (client, own; or centre, own) — PENDING
-GET    /bookings/                     role-scoped list
+GET    /centres/{id}/slots/           public: 30-min slots with capacity/booked/remaining (?from, ?days)
+GET    /centres/{id}/slot-rules/      centre (own) / lab (own centres, read-only)
+POST   /centres/{id}/slot-rules/      centre (own): weekday rule or date override
+PATCH|DELETE /centres/{id}/slot-rules/{rule_id}/
+
+GET    /patients/lookup/?email=       centre/lab: find a CLIENT for a walk-in
+POST   /patients/                     centre/lab: register a walk-in patient
+
+POST   /bookings/                     client (self) or centre (own, `patient` required) — PENDING;
+                                      409 if the slot is full
+GET    /bookings/                     role-scoped list (with patient, payment, events)
 GET    /bookings/{id}/
-POST   /bookings/{id}/cancel/         client (own) or lab (own centres) only
+POST   /bookings/{id}/cancel/         client (own) or lab (own centres); {reason}; before appointment
+POST   /bookings/{id}/complete/       centre (own) / lab: CONFIRMED → COMPLETED
+POST   /bookings/{id}/deliver-report/ centre (own) / lab: COMPLETED → REPORT_DELIVERED
 
 POST   /payments/orders/              create (201) or resume (200) the Order of a PENDING booking
 POST   /payments/                     simulate outcome for an order (SUCCESS|FAILED) — client or centre (own) — per assignment spec
@@ -182,17 +200,54 @@ Implementation details that the guarantees depend on:
   booking is recorded truthfully on the payment and flagged `SIMULATED_REFUNDED`, and the booking
   stays CANCELLED. The sync endpoint rejects paying a non-PENDING booking up front with a 409.
 
-### 5.5 Cancellation & simulated refund
+### 5.5 Cancellation, no-shows & simulated refunds
 
-`POST /bookings/{id}/cancel/`:
-- If `Payment.status == SUCCESS`, set a `refund_status = SIMULATED_REFUNDED` on the payment (no real
-  money movement, just a state flag + Celery task to "notify" — demonstrates the refund concept
-  without building a second payment rail).
-- Booking → `CANCELLED` regardless of prior state (except from another terminal state, which is
-  rejected with 409).
-- Implemented as `bookings.services.cancel_booking()`, under the same Booking-then-Payment row lock
-  as §5.4. A payment still `INITIATED` at cancel time is left alone; if it later resolves, §5.4's
-  cancelled-booking branch applies.
+`POST /bookings/{id}/cancel/` takes a required `reason` and is allowed from `PENDING` or `CONFIRMED`,
+only before `appointment_at` (409 otherwise). A captured payment is refunded (simulated: a state
+change, no second payment rail). The split is snapshotted onto the payment as `refund_amount` +
+`fee_amount`:
+
+| Case | Refund |
+|---|---|
+| Patient cancels a paid booking | amount − lab's `transaction_fee_percent` |
+| Lab cancels a paid booking | full amount |
+| Patient didn't arrive (`NO_SHOW`) | amount − lab's `transaction_fee_percent` |
+| Payment captured after the booking was already cancelled (§5.4) | full amount |
+
+Implemented in `bookings.services` under the same Booking-then-Payment row lock as §5.4, with the
+refund math in `payments.services.refund()`. A payment still `INITIATED` at cancel time is left
+alone; if it later resolves, §5.4's cancelled-booking branch applies.
+
+### 5.6 Visit lifecycle & scheduled sweeps
+
+```
+PENDING ─pay ok─▶ CONFIRMED ("awaiting arrival") ─centre/lab─▶ COMPLETED ─centre/lab─▶ REPORT_DELIVERED
+   │  └pay fail─▶ FAILED (+ failure_reason)           │
+   └─cancel / payment window expired─▶ CANCELLED ◀─cancel (before appointment)
+                                                   └─auto after appointment + 2 h─▶ NO_SHOW
+```
+
+Every transition appends a `BookingEvent` (status, actor role, optional actor, note), which is the
+booking's history in the UI and where cancellation and decline reasons are kept. Two Celery beat
+tasks (`bookings.tasks`, every 5 minutes, `celery-beat` service) drive the time-based transitions,
+each booking in its own transaction and re-checked under its row lock through the same services:
+
+- `expire_unpaid_bookings`: PENDING older than `PAYMENT_WINDOW_MINUTES` (30) → CANCELLED ("Payment
+  not completed within 30 minutes"). This frees the slot seat an abandoned checkout was holding.
+- `mark_no_shows`: CONFIRMED past `appointment_at + NO_SHOW_GRACE_MINUTES` (120) → NO_SHOW, with the
+  fee-deducted refund.
+
+### 5.7 Slot capacity
+
+A centre's `SlotRule`s say how many patients fit in each 30-minute slot, per weekday or per date
+(date rules replace that weekday's rules for the whole day). Times are the centre's local time
+(`CENTRE_TIME_ZONE = Asia/Kolkata`). `bookings.services.create_booking()` locks the **Centre** row
+(`SELECT … FOR UPDATE`), checks the slot is aligned, open and has a free seat (seats = bookings in
+PENDING/CONFIRMED/COMPLETED/NO_SHOW/REPORT_DELIVERED), then inserts. Two requests racing for the
+last seat therefore serialize; the loser gets 409. This lock takes no Booking lock, so it can't
+deadlock with the Booking→Payment order above. Patients must book 60 minutes ahead; centre staff
+may use any slot that hasn't ended (walk-ins). New centres get a default week (Mon–Sat 07:00–19:00
+×4, Sun 08:00–13:00 ×2).
 
 ## 6. Redis Usage
 
@@ -233,7 +288,7 @@ services:
   redis:         redis:7          published on 127.0.0.1 only (password-less broker)
   web:           Django runserver (dev), depends_on db, redis
   celery-worker: same image as web, `celery -A eve worker`; calls back to http://web:8000
-  celery-beat:   (not added — would host a stale-PENDING cleanup job, see README §12)
+  celery-beat:   same image, `celery -A eve beat`; schedules the §5.6 sweeps onto the worker
 ```
 
 Django's `ALLOWED_HOSTS` must include `web`, since that is the Host header on the worker's webhook
@@ -248,7 +303,8 @@ calls. Both app containers bind-mount `./backend` with the shared SELinux label 
 - **Edge cases to explicitly test**: invalid booking id, cancel-after-terminal-state, unauthorized
   cancel attempt (client trying to cancel someone else's booking; centre trying to cancel at all),
   duplicate webhook event_id, webhook with unknown payment_reference, payment simulate on an
-  already-resolved payment.
+  already-resolved payment, cancel after the appointment, fee vs. full refund, full slot (409),
+  misaligned/closed slot, no-show grace period, late capture after an expired payment window.
 
 ## 10. What's deferred and why
 

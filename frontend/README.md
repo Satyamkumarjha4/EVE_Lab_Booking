@@ -1,30 +1,63 @@
 # Frontend
 
-Next.js (App Router) + TypeScript + Tailwind + shadcn/ui bonus app (see
-[docs/PHASES.md](../docs/PHASES.md) Phase 8 and
-[docs/FRONTEND_DESIGN.md](../docs/FRONTEND_DESIGN.md)). Built early/out of order relative to
-backend Phases 5-7 to allow a UI preview; talks to the Django backend directly from the browser
-(no SSR/data-fetching used — plain client-side `fetch`, JWT held in memory only).
+Next.js (App Router) + TypeScript + Tailwind v4 + shadcn/ui (Base UI flavour) + Recharts. It talks
+to the Django API directly from the browser. Every data-fetching component is a client component;
+server components are only used for page shells and `<title>` metadata. See
+[docs/FRONTEND_DESIGN.md](../docs/FRONTEND_DESIGN.md) for the design and scope.
 
 ## Run locally
 
-1. Make sure the backend is running from the repo root:
+1. Start and seed the backend from the repo root:
    ```bash
    docker compose up -d --build
    docker compose exec web python manage.py seed_demo_data
+   docker compose exec web python manage.py seed_demo_bookings   # 90 days of history for the dashboard
    ```
 2. `cp .env.local.example .env.local` (sets `NEXT_PUBLIC_API_BASE_URL`).
 3. `npm install`
-4. `npm run dev` — serves on `http://localhost:3000`.
+4. `npm run dev`, then open http://localhost:3000.
 
-## Notes
+`npm run lint` and `npm run build` should both pass cleanly.
 
-- `seed_demo_data` creates three logins, all with password `EveDemo@2026`:
-  `client@demo.eve` (books and pays), `lab@demo.eve` (Apollo Diagnostics; the Lab dashboard view
-  on `/bookings` with cancel rights) and `centre@demo.eve` (Apollo – Connaught Place; walk-in
-  bookings, no cancel). New CLIENT accounts can also be created via `/signup`.
-- Catalog management (Lab/Centre price and availability edits) is API-only for now; there is no
-  screen for it. Use Swagger or the curl examples in the root README.
-- The session is held in memory only (no localStorage/cookies) — a hard page reload logs you out.
-  This is a deliberate simplicity tradeoff, not a bug (see `docs/FRONTEND_DESIGN.md` §2).
-- No frontend test suite — out of scope for this demo (see `docs/FRONTEND_DESIGN.md` §6).
+## Demo logins (password `EveDemo@2026`)
+
+| Where | Account | What to try |
+|---|---|---|
+| `/login` | `client@demo.eve` | Browse and filter tests by city, compare centre prices, book a slot, pay by card/UPI, manage bookings |
+| `/business/login` | `lab@demo.eve` | Apollo Diagnostics analytics across 3 centres (incl. decline and cancellation reasons), bookings with cancel and CSV export, pricing vs. market, transaction fee, each centre's bookings and read-only slots |
+| `/business/login` | `centre@demo.eve` | Single-centre analytics, walk-ins (find or register the patient, book a real slot, take payment), mark tests completed / reports delivered, slot schedule, test availability (prices are read-only) |
+
+Both login pages have one-click demo buttons. `seed_demo_bookings` also creates
+`patient1…8@demo.eve`, which own the historical bookings.
+
+## Structure
+
+```
+app/(site)/        patient site: home, /tests, /tests/[id], /centres, /centres/[id],
+                   /book, /checkout/[id], /account/bookings[/id]
+app/(auth)/        /login, /signup, /business/login (split-screen, no site chrome)
+app/dashboard/     business area: overview, bookings[/id], walk-in, catalog (pricing), centres
+components/        grouped by feature (catalog, booking, payment, dashboard, site, auth, common)
+lib/api/           fetch client (JWT + shared 401→refresh→retry) and one function per endpoint
+lib/catalog.ts     in-memory catalog index (see below)
+lib/analytics.ts   KPIs, trends and rankings derived from GET /bookings/
+```
+
+## Notes and trade-offs
+
+- **Search and comparison run client-side.** The API has no cross-centre search, so the catalog
+  (`GET /centres/` + each centre's `/tests/`) is loaded once per session into an index that powers
+  the search, city/lab/category filters and price comparison. That's 19 cached requests with the
+  seed data. At real scale this would move to a search endpoint.
+- **Analytics run client-side** over the role-scoped, unpaginated `GET /bookings/`. It's fine for
+  the demo (about 400 bookings for the demo lab). A production version would use a server-side
+  aggregate endpoint.
+- **Test categories** ("Heart", "Diabetes", …) are derived from test names
+  (`lib/test-categories.ts`) because the API has no category field.
+- **Session.** The refresh token is kept in `localStorage`, so a reload keeps you signed in; the
+  access token stays in memory. An httpOnly refresh cookie would be safer against XSS but needs
+  backend support.
+- **Times are centre-local.** Slots and appointments always display in `Asia/Kolkata`, whatever
+  the viewer's time zone, since that's when the patient has to be at the centre.
+- Payments are simulated. The card/UPI fields are not validated or sent anywhere.
+- There is no frontend test suite; the flows were verified end-to-end in a headless browser.
