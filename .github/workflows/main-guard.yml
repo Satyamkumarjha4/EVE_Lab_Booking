@@ -67,7 +67,12 @@ jobs:
       contents: write
       issues: write
     steps:
+      - name: Check for the revert token
+        id: token
+        run: echo "present=${{ secrets.MAIN_REVERT_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
+        if: steps.token.outputs.present == 'true'
         with:
           # A PAT that's allowlisted to bypass main's branch protection rule.
           # The default GITHUB_TOKEN can't push to a protected branch, and
@@ -77,6 +82,7 @@ jobs:
 
       - name: Revert the failing commit
         id: revert
+        if: steps.token.outputs.present == 'true'
         run: |
           set -euo pipefail
           git config user.name "eve-ci-bot"

@@ -30,6 +30,13 @@ runs:
       working-directory: backend
       run: python manage.py migrate --noinput
 
+    - name: Link test suite into backend/
+      shell: bash
+      # test_backend/ lives at the repo root and is only visible at backend/test_backend
+      # locally because docker-compose.yml bind-mounts it there. A plain checkout has no
+      # backend/test_backend, so pytest.ini's `testpaths = test_backend` would find nothing.
+      run: ln -s ../test_backend backend/test_backend
+
     - name: Run pytest
       shell: bash
       working-directory: backend
