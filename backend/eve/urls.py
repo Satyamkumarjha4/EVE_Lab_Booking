@@ -10,6 +10,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("auth/", include("accounts.urls")),
     path("centres/", include("catalog.urls")),
+    path("centres/", include("scheduling.urls")),
     path("tests/", CatalogTestListView.as_view(), name="test-list"),
     path("bookings/", include("bookings.urls")),
     path("payments/", include("payments.urls")),
