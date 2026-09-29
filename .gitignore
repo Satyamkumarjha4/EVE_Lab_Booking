@@ -29,3 +29,7 @@ frontend/.next/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Internal dev notes (not part of the submission)
+CLAUDE.md
+docs/PHASES.md

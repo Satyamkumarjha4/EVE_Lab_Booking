@@ -524,7 +524,7 @@ backend/                 Django project (the graded deliverable)
 frontend/                Next.js bonus UI (see frontend/README.md)
 test_backend/            Test suite, mirrors backend/'s app structure (moved out so backend/
                           holds only application code)
-docs/                    PRD, architecture, ER diagram, frontend design, phase plan, run guide
+docs/                    PRD, architecture, ER diagram, frontend design, run guide
 docker-compose.yml
 ```
 
@@ -534,7 +534,6 @@ docker-compose.yml
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Permission matrix, payment and webhook design, Redis/Celery/throttling |
 | [docs/ER_DIAGRAM.md](docs/ER_DIAGRAM.md) | Full ER diagram and the reasoning behind each key |
 | [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | Running, ports, logs, DB/Redis access, troubleshooting |
-| [docs/PHASES.md](docs/PHASES.md) | Build order and what each phase delivered |
 | [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md) | Scope of the bonus frontend |
 | [docs/API_DOC.md](docs/API_DOC.md) | Every endpoint: method, auth, request/response, error codes |
 | [docs/CI_SETUP.md](docs/CI_SETUP.md) | GitHub Actions workflows, required branch protection and secret setup |
